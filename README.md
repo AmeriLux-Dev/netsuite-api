@@ -5,7 +5,7 @@ The API layer for a NetSuite single-page app. The app's server side is SuiteScri
 - **`@amerilux/netsuite-api/server`**: declare a controller's endpoints and the script that serves them, expose them as a Restlet or a Suitelet, reject a call with an `ApiError`, call another Suitelet controller from server code, and find a File Cabinet file by name.
 - **`@amerilux/netsuite-api/client`**: a typed browser client per controller, built from the endpoint types.
 - **`@amerilux/netsuite-api/testing`**: stubs for the `N/*` modules and the vitest wiring that routes imports to them.
-- **`netsuite-api generate`**: reads the controllers and writes the client's whole view of the backend, one client module and one copy of the entity types, plus the server-side map of scripts. The client never imports from the server tree.
+- **`netsuite-api generate`**: reads the controllers and writes the client's whole view of the backend, one module per controller and an index re-exporting them, plus the server-side map of scripts. The client never imports from the server tree.
 - **`@amerilux/netsuite-api`** (the root): the wire itself. The envelope, the endpoint types, `ScriptDeclaration`, `ScriptRef`.
 
 The layout it assumes is the one `create-netsuite-project` scaffolds: `api/` (SuiteScript) and `client/` (React) as workspaces, and `netsuite.ts` at the root holding the application's names.
@@ -24,7 +24,7 @@ import { defineEndpoints, defineRestlet } from '@amerilux/netsuite-api/server';
 import type { Customer } from '../types/models.gen';
 import { findCustomer, searchCustomers } from '../services/customerService';
 
-export interface CustomerSearchRequest {
+export interface SearchRequest {
     search: string;
 }
 
@@ -32,7 +32,7 @@ export type CustomerSummary = Pick<Customer, 'id' | 'companyName'>;
 
 export const customerEndpoints = defineEndpoints({
     /** Customers whose name contains the search text. */
-    search: (request: CustomerSearchRequest): CustomerSummary[] => searchCustomers(request.search),
+    search: (request: SearchRequest): CustomerSummary[] => searchCustomers(request.search),
     byId: (request: { id: number }): Customer => findCustomer(request.id),
 });
 
@@ -53,46 +53,60 @@ The generator reads the file as source, so a few things are rules rather than co
 
 - Handlers are written inline with their parameter and return types annotated. A reference to a service function carries no types the generator can read.
 - Every type in the file is a wire shape and is exported.
-- A type is imported only from the carried modules (the generated entity types, by default) or from another controller. A service's return type is never used as a DTO by reference.
+- A type is imported only from the inlined files (the generated entity types, by default), the carried modules (the package's server entry, for `RawResponse`) or another controller. A service's return type is never used as a DTO by reference.
 - The script declaration is an object literal with literal ids, its `name` is the file name without `Controller`, and the entry point export and the `@NScriptType` header agree with the define function.
-- Type names and script ids are unique across controllers.
+- Script ids are unique across controllers, and no wire shape is named `Endpoints`. A shape's name carries no controller prefix: each controller's generated module is its own namespace.
 
 ## What the generator writes
 
-`netsuite-api generate`, run from the project root, writes four things:
+`netsuite-api generate`, run from the project root, writes four kinds of file:
 
-**`client/src/api/index.gen.ts`**, the client's view of the backend. For every controller its wire shapes and endpoint type, and for every browser-facing controller a client built from the declared script:
+**`client/src/api/<name>.gen.ts`**, one module per controller: the entity types it names (copied in, with whatever they refer to, so the module stands on its own), its wire shapes, its endpoint type and, for a browser-facing controller, a client built from the declared script:
 
 ```ts
+// client/src/api/customer.gen.ts
 import { createApiClient } from '@amerilux/netsuite-api/client';
-import type { Customer } from './models.gen';
 
-// customer (api/src/controllers/customerController.ts)
+// Entity types from api/src/types/models.gen.ts, copied so this module stands on its own.
 
-export interface CustomerSearchRequest {
+export interface Customer {
+    id: number;
+    companyName: string;
+}
+
+export interface SearchRequest {
     search: string;
 }
 
 export type CustomerSummary = Pick<Customer, 'id' | 'companyName'>;
 
-export type CustomerEndpoints = {
+/** The endpoint signatures of the customer controller, as its handlers declare them. */
+export type Endpoints = {
     /** Customers whose name contains the search text. */
-    search: (request: CustomerSearchRequest) => CustomerSummary[];
+    search: (request: SearchRequest) => CustomerSummary[];
     byId: (request: { id: number }) => Customer;
 };
 
-export const customerApi = createApiClient<CustomerEndpoints>({ kind: 'restlet', scriptId: 'customscript_app_customer', deployId: 'customdeploy_app_customer' });
+/** One typed function per endpoint of the customer controller: \`customer.api.search(...)\`. */
+export const api = createApiClient<Endpoints>({ kind: 'restlet', scriptId: 'customscript_app_customer', deployId: 'customdeploy_app_customer' });
 ```
 
-A hook calls `customerApi.search({ search: 'acme' })` and gets a `Promise<CustomerSummary[]>`. The second argument carries an `AbortSignal`.
+A type imported from another controller becomes an import of that controller's module. A type built on something the entity file imports itself (`CustomerCreate`, `CustomerPatch`: the repository package's input types) is an error, because the client could not carry it; write the wire shape out in the controller instead. A generated module no controller owns any more is deleted on the next run.
 
-**`client/src/api/models.gen.ts`**, a copy of the api's generated entity types, so the carried imports resolve.
+**`client/src/api/index.gen.ts`**, the client's view of the backend: every controller's module re-exported under the controller's name.
+
+```ts
+export * as customer from './customer.gen';
+export * as user from './user.gen';
+```
+
+A hook imports `{ customer }` from it, calls `customer.api.search({ search: 'acme' })` and gets a `Promise<customer.CustomerSummary[]>`. The second argument carries an `AbortSignal`.
 
 **`client/src/app.gen.ts`**, a verbatim copy of the app file, outside the api folder so a page or a component may import `app` without touching a client.
 
 **`api/src/scripts.gen.ts`**, the server-side map of every declared script by controller name. A repository passes an entry to `createSuiteletClient`; nothing else needs it.
 
-`netsuite-api check` exits non-zero when any generated file is missing or out of date, for CI. `netsuite-api generate --dry-run` prints the client module instead of writing anything.
+`netsuite-api check` exits non-zero when any generated file is missing, out of date or left over, for CI. `netsuite-api generate --dry-run` prints every file instead of writing anything.
 
 ### The app file
 
@@ -106,17 +120,17 @@ A hook calls `customerApi.search({ search: 'acme' })` and gets a `Promise<Custom
 {
   "controllers": "api/src/controllers",
   "appFile": "netsuite.ts",
-  "outFile": "client/src/api/index.gen.ts",
+  "outDir": "client/src/api",
   "appOutFile": "client/src/app.gen.ts",
   "scriptsOutFile": "api/src/scripts.gen.ts",
   "clientModule": "@amerilux/netsuite-api/client",
   "wireModule": "@amerilux/netsuite-api",
-  "typeImports": { "../types/models.gen": "./models.gen", "@amerilux/netsuite-api/server": "@amerilux/netsuite-api/client" },
-  "copyFiles": { "api/src/types/models.gen.ts": "client/src/api/models.gen.ts" }
+  "typeImports": { "@amerilux/netsuite-api/server": "@amerilux/netsuite-api/client" },
+  "inlineTypes": { "../types/models.gen": "api/src/types/models.gen.ts" }
 }
 ```
 
-Paths are relative to the config file. `typeImports` maps a specifier as written in a controller to the specifier the client resolves; only listed specifiers may be imported for types (the package's server entry maps to its client entry so `RawResponse` carries over). `copyFiles` copies the files those specifiers point at.
+Paths are relative to the config file. `outDir` holds the controller modules and the index, and nothing else. `inlineTypes` maps a specifier as written in a controller to the type-only file whose declarations are copied into the module of every controller importing from it. `typeImports` maps a specifier to the one the client resolves, for a type that stays an import (the package's server entry maps to its client entry so `RawResponse` carries over). A type imported from any other module is an error.
 
 ## The client at runtime
 
@@ -128,7 +142,13 @@ import { configureApiClient } from '@amerilux/netsuite-api/client';
 if (import.meta.env.DEV) configureApiClient({ basePaths: { restlet: '/api/restlet', suitelet: '/api/suitelet' } });
 ```
 
-A failed call rejects with an `ApiClientError` carrying the envelope's status and message.
+A failed call rejects with an `ApiClientError` carrying the envelope's status and message; a call that got no answer at all carries `NO_RESPONSE_STATUS` (0). Before it rejects, the failure goes to the handler `configureApiClient` was given, with the script, the endpoint and the request, so the app reports every failure in one place and a hook carries no error handling of its own:
+
+```ts
+configureApiClient({ onError: (error, { endpoint }) => showBanner(`${endpoint}: ${error.message}`) });
+```
+
+The rejection still reaches the caller, so a query sees its error state. A call that reports the failure itself passes `{ handleError: false }` as its second argument; an aborted call is not a failure and never reaches the handler.
 
 ## Authorizing calls
 
@@ -163,7 +183,7 @@ export const documentsEndpoints = defineEndpoints({
 });
 ```
 
-In the browser, `documentsApi.csv({ month })` resolves to a `Blob`; hand it to `URL.createObjectURL` for a download link. A text answer takes a content type, a body, optional headers and, for a download, a file name; a file answer takes an `N/file` object and whether to show it inline. A failure still arrives as the envelope and is thrown as an `ApiClientError`. A Restlet cannot write a raw answer: a handler returning one there is a 500.
+In the browser, `documents.api.csv({ month })` resolves to a `Blob`; hand it to `URL.createObjectURL` for a download link. A text answer takes a content type, a body, optional headers and, for a download, a file name; a file answer takes an `N/file` object and whether to show it inline. A failure still arrives as the envelope and is thrown as an `ApiClientError`. A Restlet cannot write a raw answer: a handler returning one there is a 500.
 
 ## Calling a Suitelet from server code
 

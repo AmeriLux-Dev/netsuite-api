@@ -8,27 +8,32 @@ import type { FileSystemAdapter } from './file-system.js';
 export interface ClientGeneratorConfig {
     /** Directory holding the controllers: one `<name>Controller.ts` per script. */
     controllers: string;
-    /** The file declaring `app` (and any other id no controller or model owns), copied into the client module verbatim. */
+    /** The file declaring `app` (and any other id no controller or model owns), copied into the client verbatim. */
     appFile: string;
-    /** The generated client module: every wire shape, every endpoint type, one client per browser-facing controller. */
-    outFile: string;
+    /** The client's generated directory: one `<name>.gen.ts` per controller (its wire shapes, its endpoint type, its client) and `index.gen.ts` re-exporting each under the controller's name. Nothing else lives there. */
+    outDir: string;
     /** The generated copy of the app file for the client, outside the api folder so pages and components may import it. */
     appOutFile: string;
     /** The generated server-side `scripts` map: what a repository passes to createSuiteletClient. */
     scriptsOutFile: string;
-    /** The specifier the client module imports `createApiClient` from. */
+    /** The specifier the controller modules import `createApiClient` from. */
     clientModule: string;
     /** The specifier the scripts map imports `ScriptRef` from. */
     wireModule: string;
     /**
-     * Type imports a controller may carry into the client module, as the specifier written in the
-     * controller mapped to the specifier the client resolves: the generated entity types, and the
-     * package's server entry mapped to its client entry (for `RawResponse`). A type imported from any
-     * other module is an error, because the client could not resolve it.
+     * Type imports a controller may carry into its generated module as imports, as the specifier
+     * written in the controller mapped to the specifier the client resolves: the package's server
+     * entry mapped to its client entry (for `RawResponse`). A type imported from any module listed
+     * in neither this nor `inlineTypes` is an error, because the client could not resolve it.
      */
     typeImports: Record<string, string>;
-    /** Files copied into the client as they are, source to destination: the generated entity types the carried imports point at. */
-    copyFiles: Record<string, string>;
+    /**
+     * Type-only files whose declarations are copied into the generated module of every controller
+     * that imports from them, as the specifier written in the controller mapped to the file: the
+     * generated entity types. A controller module carries the types it names, and what those refer
+     * to, so the client needs no copy of the file.
+     */
+    inlineTypes: Record<string, string>;
 }
 
 export interface ResolvedClientGeneratorConfig extends ClientGeneratorConfig {
@@ -41,13 +46,13 @@ export const DEFAULT_CONFIG_FILE_NAME = 'netsuite-api.config.json';
 export const defaultClientGeneratorConfig: ClientGeneratorConfig = {
     controllers: 'api/src/controllers',
     appFile: 'netsuite.ts',
-    outFile: 'client/src/api/index.gen.ts',
+    outDir: 'client/src/api',
     appOutFile: 'client/src/app.gen.ts',
     scriptsOutFile: 'api/src/scripts.gen.ts',
     clientModule: '@amerilux/netsuite-api/client',
     wireModule: '@amerilux/netsuite-api',
-    typeImports: { '../types/models.gen': './models.gen', '@amerilux/netsuite-api/server': '@amerilux/netsuite-api/client' },
-    copyFiles: { 'api/src/types/models.gen.ts': 'client/src/api/models.gen.ts' },
+    typeImports: { '@amerilux/netsuite-api/server': '@amerilux/netsuite-api/client' },
+    inlineTypes: { '../types/models.gen': 'api/src/types/models.gen.ts' },
 };
 
 export class ClientGeneratorConfigError extends Error {
@@ -57,8 +62,8 @@ export class ClientGeneratorConfigError extends Error {
     }
 }
 
-const stringSettings = ['controllers', 'appFile', 'outFile', 'appOutFile', 'scriptsOutFile', 'clientModule', 'wireModule'] as const;
-const mapSettings = ['typeImports', 'copyFiles'] as const;
+const stringSettings = ['controllers', 'appFile', 'outDir', 'appOutFile', 'scriptsOutFile', 'clientModule', 'wireModule'] as const;
+const mapSettings = ['typeImports', 'inlineTypes'] as const;
 
 function isStringMap(value: unknown): value is Record<string, string> {
     return !!value && typeof value === 'object' && !Array.isArray(value) && Object.values(value).every((entry) => typeof entry === 'string' && entry !== '');
@@ -66,7 +71,7 @@ function isStringMap(value: unknown): value is Record<string, string> {
 
 function validateClientGeneratorConfig(raw: Record<string, unknown>, configPath: string): ClientGeneratorConfig {
     const problems: string[] = [];
-    const config: ClientGeneratorConfig = { ...defaultClientGeneratorConfig, typeImports: { ...defaultClientGeneratorConfig.typeImports }, copyFiles: { ...defaultClientGeneratorConfig.copyFiles } };
+    const config: ClientGeneratorConfig = { ...defaultClientGeneratorConfig, typeImports: { ...defaultClientGeneratorConfig.typeImports }, inlineTypes: { ...defaultClientGeneratorConfig.inlineTypes } };
 
     for (const setting of stringSettings) {
         const value = raw[setting];

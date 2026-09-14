@@ -18,13 +18,13 @@ export const CLI_USAGE = [
     'Usage: netsuite-api <command> [options]',
     '',
     'Commands:',
-    '  generate        Read the controllers and the app file; write the client module, the scripts map and the copied type files.',
-    '  check           Exit non-zero when a generated file is missing or out of date.',
+    '  generate        Read the controllers and the app file; write a client module per controller, the client index, the app module and the scripts map, and delete a generated file no controller owns.',
+    '  check           Exit non-zero when a generated file is missing, out of date or left over.',
     '  help            Show this message.',
     '',
     'Options:',
     '  --config <path>       Config file (default: netsuite-api.config.json in the working directory).',
-    '  --dry-run             With generate: print the client module that would be written without writing anything.',
+    '  --dry-run             With generate: print every file that would be written, without writing anything.',
 ].join('\n');
 
 export const EXIT_SUCCESS = 0;
@@ -69,7 +69,7 @@ export function runCli(argv: string[], environment: CliEnvironment): number {
     }
     const options: GenerateClientOptions = { config, fileSystem };
     const failure = (plan: ClientGenerationPlan) => {
-        environment.stderr(['The controllers cannot be turned into a client module:', ...formatProblems(plan)].join('\n'));
+        environment.stderr(['The controllers cannot be turned into client modules:', ...formatProblems(plan)].join('\n'));
         return EXIT_PROBLEMS;
     };
 
@@ -77,26 +77,28 @@ export function runCli(argv: string[], environment: CliEnvironment): number {
         if (readFlagOption(parsed.options, 'dry-run')) {
             const plan = planClientGeneration(options);
             if (plan.problems.length > 0) return failure(plan);
-            environment.stdout(plan.files[0].content);
+            environment.stdout(plan.files.map((file) => `// ---- ${relativeTo(environment.cwd, file.path)}\n${file.content}`).join('\n'));
             return EXIT_SUCCESS;
         }
         const result = runClientGeneration(options);
         if (result.problems.length > 0) return failure(result);
         environment.stdout([
-            `netsuite-api: ${result.controllers.length} controller(s), ${result.writtenFiles.length} file(s) written, ${result.unchangedFiles.length} unchanged.`,
+            `netsuite-api: ${result.controllers.length} controller(s), ${result.writtenFiles.length} file(s) written, ${result.unchangedFiles.length} unchanged${result.deletedFiles.length > 0 ? `, ${result.deletedFiles.length} deleted` : ''}.`,
             ...describeControllers(result),
             ...result.writtenFiles.map((filePath) => ` - wrote ${relativeTo(environment.cwd, filePath)}`),
+            ...result.deletedFiles.map((filePath) => ` - deleted ${relativeTo(environment.cwd, filePath)}`),
         ].join('\n'));
         return EXIT_SUCCESS;
     }
 
     const check = checkClientGeneration(options);
     if (check.problems.length > 0) return failure(check);
-    if (check.missingFiles.length > 0 || check.staleFiles.length > 0) {
+    if (check.missingFiles.length > 0 || check.staleFiles.length > 0 || check.leftoverFiles.length > 0) {
         environment.stderr([
             'The generated files are not up to date. Run `netsuite-api generate`.',
             ...check.missingFiles.map((filePath) => ` - missing: ${relativeTo(environment.cwd, filePath)}`),
             ...check.staleFiles.map((filePath) => ` - out of date: ${relativeTo(environment.cwd, filePath)}`),
+            ...check.leftoverFiles.map((filePath) => ` - left over: ${relativeTo(environment.cwd, filePath)}`),
         ].join('\n'));
         return EXIT_PROBLEMS;
     }

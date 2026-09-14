@@ -4,19 +4,33 @@ import { defaultClientGeneratorConfig, loadClientGeneratorConfig } from '../../t
 import { createInMemoryFileSystemAdapter } from '../../tooling/file-system.js';
 import { checkClientGeneration, planClientGeneration, runClientGeneration } from '../../tooling/generate.js';
 import { runCli } from '../../tooling/cli/main.js';
-import { appSource, expectedAppModule, expectedClientModule, expectedScriptsModule, modelsSource, userControllerSource, userRolesControllerSource } from './fixtures.js';
+import {
+    appSource,
+    expectedAppModule,
+    expectedIndexModule,
+    expectedScriptsModule,
+    expectedUserModule,
+    expectedUserRolesModule,
+    modelsSource,
+    userControllerSource,
+    userRolesControllerSource,
+} from './fixtures.js';
 
 const projectRoot = nodePath.resolve('/project');
-const clientModuleFile = nodePath.join(projectRoot, 'client', 'src', 'api', 'index.gen.ts');
+const clientDirectory = nodePath.join(projectRoot, 'client', 'src', 'api');
+const userModuleFile = nodePath.join(clientDirectory, 'user.gen.ts');
+const userRolesModuleFile = nodePath.join(clientDirectory, 'userRoles.gen.ts');
+const indexModuleFile = nodePath.join(clientDirectory, 'index.gen.ts');
 const appModuleFile = nodePath.join(projectRoot, 'client', 'src', 'app.gen.ts');
 const scriptsModuleFile = nodePath.join(projectRoot, 'api', 'src', 'scripts.gen.ts');
-const modelsCopyFile = nodePath.join(projectRoot, 'client', 'src', 'api', 'models.gen.ts');
+const modelsFile = nodePath.join(projectRoot, 'api', 'src', 'types', 'models.gen.ts');
 const controllersDirectory = nodePath.join(projectRoot, 'api', 'src', 'controllers');
+const allGeneratedFiles = [userModuleFile, userRolesModuleFile, indexModuleFile, appModuleFile, scriptsModuleFile];
 
 function projectFiles(overrides: Record<string, string | undefined> = {}) {
     const files: Record<string, string | undefined> = {
         [nodePath.join(projectRoot, 'netsuite.ts')]: appSource,
-        [nodePath.join(projectRoot, 'api', 'src', 'types', 'models.gen.ts')]: modelsSource,
+        [modelsFile]: modelsSource,
         [nodePath.join(controllersDirectory, 'userController.ts')]: userControllerSource,
         [nodePath.join(controllersDirectory, 'userRolesController.ts')]: userRolesControllerSource,
         [nodePath.join(controllersDirectory, 'notes.md')]: 'not a controller',
@@ -29,30 +43,45 @@ function optionsFor(fileSystem: ReturnType<typeof projectFiles>) {
     return { config: { ...defaultClientGeneratorConfig, rootDirectory: projectRoot }, fileSystem };
 }
 
+/** A minimal Restlet controller with the given body, at api/src/controllers/<name>Controller.ts. */
+function restletController(name: string, body: string): string {
+    return `/**
+ * @NScriptType Restlet
+ */
+import { defineEndpoints, defineRestlet } from '@amerilux/netsuite-api/server';
+${body}
+export const post = defineRestlet({ name: '${name}', scriptId: 'customscript_demo_${name}', deployId: 'customdeploy_demo_${name}' }, ${name}Endpoints);
+`;
+}
+
 describe('planClientGeneration', () => {
-    it('plans the client module, the app module, the scripts module and the copied model types', () => {
+    it('plans a module per controller, the client index, the app module and the scripts module', () => {
         const plan = planClientGeneration(optionsFor(projectFiles()));
         expect(plan.problems).toEqual([]);
         expect(plan.controllers).toEqual([
             { name: 'user', filePath: 'api/src/controllers/userController.ts', kind: 'restlet', browser: true, endpointCount: 1 },
             { name: 'userRoles', filePath: 'api/src/controllers/userRolesController.ts', kind: 'suitelet', browser: false, endpointCount: 1 },
         ]);
-        expect(plan.files.map((file) => file.path)).toEqual([clientModuleFile, appModuleFile, scriptsModuleFile, modelsCopyFile]);
-        expect(plan.files[0].content).toBe(expectedClientModule);
-        expect(plan.files[1].content).toBe(expectedAppModule);
-        expect(plan.files[2].content).toBe(expectedScriptsModule);
-        expect(plan.files[3].content).toBe(modelsSource);
+        expect(plan.files.map((file) => file.path)).toEqual(allGeneratedFiles);
+        expect(plan.files[0].content).toBe(expectedUserModule);
+        expect(plan.files[1].content).toBe(expectedUserRolesModule);
+        expect(plan.files[2].content).toBe(expectedIndexModule);
+        expect(plan.files[3].content).toBe(expectedAppModule);
+        expect(plan.files[4].content).toBe(expectedScriptsModule);
+        expect(plan.leftoverFiles).toEqual([]);
     });
 
-    it('leaves out the client import when no controller faces the browser', () => {
+    it('leaves out the client import when the controller does not face the browser', () => {
         const fileSystem = projectFiles({
             [nodePath.join(controllersDirectory, 'userController.ts')]: userControllerSource.replace("deployId: 'customdeploy_demo_user',", "deployId: 'customdeploy_demo_user',\n    browser: false,"),
         });
         const plan = planClientGeneration(optionsFor(fileSystem));
         expect(plan.problems).toEqual([]);
         expect(plan.files[0].content).not.toContain('createApiClient');
-        expect(plan.files[0].content).toContain('export type UserEndpoints = {');
-        expect(plan.files[2].content).toContain("user: { kind: 'restlet', scriptId: 'customscript_demo_user', deployId: 'customdeploy_demo_user', browser: false },");
+        expect(plan.files[0].content).toContain('// Called by server code only: its types, and no client.');
+        expect(plan.files[0].content).toContain('export type Endpoints = {');
+        expect(plan.files[2].content).toContain('/** The user controller: its request and response types only; server code calls it, the browser does not. */');
+        expect(plan.files[4].content).toContain("user: { kind: 'restlet', scriptId: 'customscript_demo_user', deployId: 'customdeploy_demo_user', browser: false },");
     });
 
     it('lists the raw endpoints on the client and imports RawResponse from the client entry', () => {
@@ -70,37 +99,100 @@ export const onRequest = defineSuitelet({ name: 'documents', scriptId: 'customsc
 `;
         const plan = planClientGeneration(optionsFor(projectFiles({ [nodePath.join(controllersDirectory, 'documentsController.ts')]: documentsController })));
         expect(plan.problems).toEqual([]);
-        expect(plan.files[0].content).toContain("import type { RawResponse } from '@amerilux/netsuite-api/client';");
-        expect(plan.files[0].content).toContain('    csv: (request: { month: string }) => RawResponse;');
-        expect(plan.files[0].content).toContain("export const documentsApi = createApiClient<DocumentsEndpoints>({ kind: 'suitelet', scriptId: 'customscript_demo_documents', deployId: 'customdeploy_demo_documents' }, { rawEndpoints: ['csv'] });");
+        const documentsModule = plan.files[0];
+        expect(documentsModule.path).toBe(nodePath.join(clientDirectory, 'documents.gen.ts'));
+        expect(documentsModule.content).toContain("import type { RawResponse } from '@amerilux/netsuite-api/client';");
+        expect(documentsModule.content).toContain('    csv: (request: { month: string }) => RawResponse;');
+        expect(documentsModule.content).toContain("export const api = createApiClient<Endpoints>({ kind: 'suitelet', scriptId: 'customscript_demo_documents', deployId: 'customdeploy_demo_documents' }, { rawEndpoints: ['csv'] });");
     });
 
-    it('reports a missing app file, a missing models file and an empty controllers folder', () => {
-        const problems = planClientGeneration(optionsFor(projectFiles({
-            [nodePath.join(projectRoot, 'netsuite.ts')]: undefined,
-            [nodePath.join(projectRoot, 'api', 'src', 'types', 'models.gen.ts')]: undefined,
-            [nodePath.join(controllersDirectory, 'userController.ts')]: undefined,
-            [nodePath.join(controllersDirectory, 'userRolesController.ts')]: undefined,
-        }))).problems;
-        expect(problems).toEqual([
-            { filePath: 'api/src/controllers', message: 'holds no <name>Controller.ts file.' },
-            { filePath: 'netsuite.ts', message: 'the app file does not exist.' },
-            { filePath: 'api/src/types/models.gen.ts', message: 'the file to copy into the client does not exist; run the model generator first.' },
-        ]);
+    it('copies the entity types a controller names, what they refer to, and an alias for a renamed import', () => {
+        const employeeController = restletController('employee', `
+import type { Employee as EmployeeRecord } from '../types/models.gen';
+export const employeeEndpoints = defineEndpoints({ me: (): EmployeeRecord => ({} as EmployeeRecord) });`);
+        const plan = planClientGeneration(optionsFor(projectFiles({ [nodePath.join(controllersDirectory, 'employeeController.ts')]: employeeController })));
+        expect(plan.problems).toEqual([]);
+        const employeeModule = plan.files[0].content;
+        expect(employeeModule).toContain(
+            [
+                '// Entity types from api/src/types/models.gen.ts, copied so this module stands on its own.',
+                '',
+                'export interface Department {',
+                '    id: number;',
+                '    name: string;',
+                '}',
+                '',
+                'export interface Employee {',
+                '    id: number;',
+                '    name: string;',
+                '    department: Department;',
+                '    supervisor?: Employee;',
+                '}',
+                '',
+                'export type EmployeeRecord = Employee;',
+                '',
+                '/** The endpoint signatures of the employee controller, as its handlers declare them. */',
+            ].join('\n'),
+        );
+        expect(employeeModule).not.toContain('EmployeeRole');
+        expect(employeeModule).not.toContain('EmployeeCreate');
     });
 
-    it('reports a type name or a script id two controllers both declare', () => {
-        const duplicate = projectFiles({
-            [nodePath.join(controllersDirectory, 'userController.ts')]: userControllerSource
-                .replace("import type { RoleSummary } from './userRolesController';", 'export interface RoleSummary { roleId: number }')
-                .replace("scriptId: 'customscript_demo_user'", "scriptId: 'customscript_demo_user_roles'"),
-        });
-        const plan = planClientGeneration(optionsFor(duplicate));
+    it('reports an entity type built on the repository package, one the models file lacks, and a sibling controller that does not exist', () => {
+        const employeeController = restletController('employee', `
+import type { EmployeeCreate, Missing } from '../types/models.gen';
+import type { OrderSummary } from './ordersController';
+export const employeeEndpoints = defineEndpoints({ create: (request: EmployeeCreate): Missing => ({} as Missing), orders: (): OrderSummary[] => [] });`);
+        const plan = planClientGeneration(optionsFor(projectFiles({ [nodePath.join(controllersDirectory, 'employeeController.ts')]: employeeController })));
         expect(plan.problems).toEqual([
-            { filePath: 'api/src/controllers/userRolesController.ts', message: "type 'RoleSummary' is also declared by api/src/controllers/userController.ts; the generated module holds every controller, so names are unique across them." },
-            { filePath: 'api/src/controllers/userRolesController.ts', message: "scriptId 'customscript_demo_user_roles' is also declared by api/src/controllers/userController.ts; every controller is its own script." },
+            { filePath: 'api/src/controllers/employeeController.ts', message: "imports types from './ordersController', which is not a controller in api/src/controllers." },
+            { filePath: 'api/src/controllers/employeeController.ts', message: "type 'Missing' is not declared in api/src/types/models.gen.ts." },
+            {
+                filePath: 'api/src/controllers/employeeController.ts',
+                message: "type 'EmployeeCreate' (api/src/types/models.gen.ts) is built on EntityCreate from '@amerilux/netsuite-repository', which the client cannot carry; write the wire shape out in the controller instead.",
+            },
         ]);
         expect(plan.files).toEqual([]);
+    });
+
+    it('reports a missing app file, an empty controllers folder, and a missing models file when a controller names it', () => {
+        expect(planClientGeneration(optionsFor(projectFiles({
+            [nodePath.join(projectRoot, 'netsuite.ts')]: undefined,
+            [modelsFile]: undefined,
+            [nodePath.join(controllersDirectory, 'userController.ts')]: undefined,
+            [nodePath.join(controllersDirectory, 'userRolesController.ts')]: undefined,
+        }))).problems).toEqual([
+            { filePath: 'api/src/controllers', message: 'holds no <name>Controller.ts file.' },
+            { filePath: 'netsuite.ts', message: 'the app file does not exist.' },
+        ]);
+        expect(planClientGeneration(optionsFor(projectFiles({ [modelsFile]: undefined }))).problems).toEqual([
+            { filePath: 'api/src/types/models.gen.ts', message: 'the file to copy types from does not exist; run the model generator first.' },
+        ]);
+    });
+
+    it('reports a script id two controllers both declare, a controller that would take the index, and a wire shape named Endpoints', () => {
+        const plan = planClientGeneration(optionsFor(projectFiles({
+            [nodePath.join(controllersDirectory, 'userController.ts')]: userControllerSource.replace("scriptId: 'customscript_demo_user'", "scriptId: 'customscript_demo_user_roles'"),
+            [nodePath.join(controllersDirectory, 'indexController.ts')]: restletController('index', `
+export interface Endpoints { a: number }
+export const indexEndpoints = defineEndpoints({ list: (): string[] => [] });`),
+        })));
+        expect(plan.problems).toEqual([
+            { filePath: 'api/src/controllers/indexController.ts', message: "type 'Endpoints' is the name the generated module gives the endpoint signatures; call the wire shape something else." },
+            { filePath: 'api/src/controllers/userRolesController.ts', message: "scriptId 'customscript_demo_user_roles' is also declared by api/src/controllers/userController.ts; every controller is its own script." },
+        ]);
+        const namedIndex = planClientGeneration(optionsFor(projectFiles({
+            [nodePath.join(controllersDirectory, 'indexController.ts')]: restletController('index', 'export const indexEndpoints = defineEndpoints({ list: (): string[] => [] });'),
+        })));
+        expect(namedIndex.problems).toEqual([{ filePath: 'api/src/controllers/indexController.ts', message: "a controller named 'index' would take the client's index.gen.ts; name it something else." }]);
+    });
+
+    it('lists a generated file in the client directory that no controller owns', () => {
+        const leftover = nodePath.join(clientDirectory, 'orders.gen.ts');
+        const oldCopy = nodePath.join(clientDirectory, 'models.gen.ts');
+        const plan = planClientGeneration(optionsFor(projectFiles({ [leftover]: '// old', [oldCopy]: modelsSource, [nodePath.join(clientDirectory, 'helpers.ts')]: '// not generated' })));
+        expect(plan.problems).toEqual([]);
+        expect(plan.leftoverFiles.map((filePath) => nodePath.basename(filePath))).toEqual(['models.gen.ts', 'orders.gen.ts']);
     });
 });
 
@@ -108,25 +200,43 @@ describe('runClientGeneration and checkClientGeneration', () => {
     it('writes the files once and reports them current afterwards', () => {
         const fileSystem = projectFiles();
         const options = optionsFor(fileSystem);
-        expect(checkClientGeneration(options).missingFiles).toEqual([clientModuleFile, appModuleFile, scriptsModuleFile, modelsCopyFile]);
+        expect(checkClientGeneration(options).missingFiles).toEqual(allGeneratedFiles);
         const first = runClientGeneration(options);
-        expect(first.writtenFiles).toEqual([clientModuleFile, appModuleFile, scriptsModuleFile, modelsCopyFile]);
-        expect(fileSystem.readTextFile(clientModuleFile)).toBe(expectedClientModule);
+        expect(first.writtenFiles).toEqual(allGeneratedFiles);
+        expect(fileSystem.readTextFile(userModuleFile)).toBe(expectedUserModule);
+        expect(fileSystem.readTextFile(userRolesModuleFile)).toBe(expectedUserRolesModule);
+        expect(fileSystem.readTextFile(indexModuleFile)).toBe(expectedIndexModule);
         expect(fileSystem.readTextFile(appModuleFile)).toBe(expectedAppModule);
         expect(fileSystem.readTextFile(scriptsModuleFile)).toBe(expectedScriptsModule);
         const second = runClientGeneration(options);
         expect(second.writtenFiles).toEqual([]);
-        expect(second.unchangedFiles).toHaveLength(4);
-        expect(checkClientGeneration(options)).toMatchObject({ missingFiles: [], staleFiles: [] });
+        expect(second.unchangedFiles).toHaveLength(5);
+        expect(checkClientGeneration(options)).toMatchObject({ missingFiles: [], staleFiles: [], leftoverFiles: [] });
         fileSystem.writeTextFile(scriptsModuleFile, '// edited by hand');
         expect(checkClientGeneration(options).staleFiles).toEqual([scriptsModuleFile]);
+    });
+
+    it('deletes the module of a removed controller and the old copy of the entity types', () => {
+        const fileSystem = projectFiles();
+        const options = optionsFor(fileSystem);
+        runClientGeneration(options);
+        const oldCopy = nodePath.join(clientDirectory, 'models.gen.ts');
+        fileSystem.writeTextFile(oldCopy, modelsSource);
+        fileSystem.deleteFile(nodePath.join(controllersDirectory, 'userRolesController.ts'));
+        fileSystem.writeTextFile(nodePath.join(controllersDirectory, 'userController.ts'), userControllerSource.replace("import type { RoleSummary } from './userRolesController';", 'export interface RoleSummary { roleId: number }'));
+        expect(checkClientGeneration(options).leftoverFiles.map((filePath) => nodePath.basename(filePath))).toEqual(['models.gen.ts', 'userRoles.gen.ts']);
+        const result = runClientGeneration(options);
+        expect(result.deletedFiles.map((filePath) => nodePath.basename(filePath))).toEqual(['models.gen.ts', 'userRoles.gen.ts']);
+        expect(fileSystem.fileExists(userRolesModuleFile)).toBe(false);
+        expect(fileSystem.fileExists(oldCopy)).toBe(false);
+        expect(checkClientGeneration(options)).toMatchObject({ missingFiles: [], staleFiles: [], leftoverFiles: [] });
     });
 
     it('writes nothing when there are problems', () => {
         const fileSystem = projectFiles({ [nodePath.join(controllersDirectory, 'brokenController.ts')]: 'export interface A { a: 1 }' });
         const result = runClientGeneration(optionsFor(fileSystem));
         expect(result.writtenFiles).toEqual([]);
-        expect(fileSystem.fileExists(clientModuleFile)).toBe(false);
+        expect(fileSystem.fileExists(userModuleFile)).toBe(false);
     });
 });
 
@@ -136,10 +246,10 @@ describe('loadClientGeneratorConfig', () => {
         expect(withoutConfig).toEqual({ ...defaultClientGeneratorConfig, rootDirectory: projectRoot });
 
         const configPath = nodePath.join(projectRoot, 'netsuite-api.config.json');
-        const fileSystem = createInMemoryFileSystemAdapter({ [configPath]: JSON.stringify({ outFile: 'client/src/generated/api.ts', typeImports: { '@shared/types': '@shared/types' } }) });
+        const fileSystem = createInMemoryFileSystemAdapter({ [configPath]: JSON.stringify({ outDir: 'client/src/generated', typeImports: { '@shared/types': '@shared/types' } }) });
         expect(loadClientGeneratorConfig(fileSystem, projectRoot)).toEqual({
             ...defaultClientGeneratorConfig,
-            outFile: 'client/src/generated/api.ts',
+            outDir: 'client/src/generated',
             typeImports: { '@shared/types': '@shared/types' },
             rootDirectory: projectRoot,
         });
@@ -147,8 +257,8 @@ describe('loadClientGeneratorConfig', () => {
 
     it('rejects a bad setting, an unknown setting and a named config that does not exist', () => {
         const configPath = nodePath.join(projectRoot, 'netsuite-api.config.json');
-        const fileSystem = createInMemoryFileSystemAdapter({ [configPath]: JSON.stringify({ outFile: '', copyFiles: ['x'], extra: 1 }) });
-        expect(() => loadClientGeneratorConfig(fileSystem, projectRoot)).toThrow(/'outFile' must be a non-empty string\.\n - 'copyFiles' must be an object of strings\.\n - 'extra' is not a setting\./);
+        const fileSystem = createInMemoryFileSystemAdapter({ [configPath]: JSON.stringify({ outDir: '', inlineTypes: ['x'], outFile: 'client/src/api/index.gen.ts' }) });
+        expect(() => loadClientGeneratorConfig(fileSystem, projectRoot)).toThrow(/'outDir' must be a non-empty string\.\n - 'inlineTypes' must be an object of strings\.\n - 'outFile' is not a setting\./);
         expect(() => loadClientGeneratorConfig(fileSystem, projectRoot, 'other.json')).toThrow(/does not exist/);
     });
 });
@@ -161,44 +271,49 @@ describe('runCli', () => {
     }
 
     it('generates, then reports the files current', () => {
-        const fileSystem = projectFiles();
+        const fileSystem = projectFiles({ [nodePath.join(clientDirectory, 'models.gen.ts')]: modelsSource });
         const first = environment(fileSystem);
         expect(runCli(['generate'], first.environment)).toBe(0);
         expect(first.stdout.join('\n')).toBe([
-            'netsuite-api: 2 controller(s), 4 file(s) written, 0 unchanged.',
+            'netsuite-api: 2 controller(s), 5 file(s) written, 0 unchanged, 1 deleted.',
             ' - user (restlet): 1 endpoint(s)',
             ' - userRoles (suitelet): 1 endpoint(s), types only',
+            ' - wrote client/src/api/user.gen.ts',
+            ' - wrote client/src/api/userRoles.gen.ts',
             ' - wrote client/src/api/index.gen.ts',
             ' - wrote client/src/app.gen.ts',
             ' - wrote api/src/scripts.gen.ts',
-            ' - wrote client/src/api/models.gen.ts',
+            ' - deleted client/src/api/models.gen.ts',
         ].join('\n'));
         const second = environment(fileSystem);
         expect(runCli(['check'], second.environment)).toBe(0);
-        expect(second.stdout[0]).toMatch(/^Generated files are up to date \(4 file\(s\)\)\./);
+        expect(second.stdout[0]).toMatch(/^Generated files are up to date \(5 file\(s\)\)\./);
     });
 
-    it('prints the client module with --dry-run and writes nothing', () => {
+    it('prints every file with --dry-run and writes nothing', () => {
         const fileSystem = projectFiles();
         const { environment: cliEnvironment, stdout } = environment(fileSystem);
         expect(runCli(['generate', '--dry-run'], cliEnvironment)).toBe(0);
-        expect(stdout[0]).toBe(expectedClientModule);
-        expect(fileSystem.fileExists(clientModuleFile)).toBe(false);
+        expect(stdout[0].startsWith(`// ---- client/src/api/user.gen.ts\n${expectedUserModule}\n// ---- client/src/api/userRoles.gen.ts\n${expectedUserRolesModule}`)).toBe(true);
+        expect(stdout[0]).toContain('// ---- api/src/scripts.gen.ts\n');
+        expect(fileSystem.fileExists(userModuleFile)).toBe(false);
     });
 
-    it('lists the problems and exits 1 when a controller cannot be read, and 1 when a file is missing', () => {
+    it('lists the problems and exits 1 when a controller cannot be read, and 1 when a file is missing or left over', () => {
         const broken = environment(projectFiles({ [nodePath.join(controllersDirectory, 'brokenController.ts')]: 'export interface A { a: 1 }' }));
         expect(runCli(['generate'], broken.environment)).toBe(1);
         expect(broken.stderr[0]).toContain("api/src/controllers/brokenController.ts: must declare 'export const brokenEndpoints = defineEndpoints({ ... })'.");
 
-        const missing = environment(projectFiles());
+        const missing = environment(projectFiles({ [nodePath.join(clientDirectory, 'orders.gen.ts')]: '// old' }));
         expect(runCli(['check'], missing.environment)).toBe(1);
         expect(missing.stderr[0]).toBe([
             'The generated files are not up to date. Run `netsuite-api generate`.',
+            ' - missing: client/src/api/user.gen.ts',
+            ' - missing: client/src/api/userRoles.gen.ts',
             ' - missing: client/src/api/index.gen.ts',
             ' - missing: client/src/app.gen.ts',
             ' - missing: api/src/scripts.gen.ts',
-            ' - missing: client/src/api/models.gen.ts',
+            ' - left over: client/src/api/orders.gen.ts',
         ].join('\n'));
     });
 

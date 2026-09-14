@@ -1,20 +1,33 @@
-import type { ControllerContract, DeclaredScript, EndpointSignature } from './controllerReader.js';
+import { GENERATED_CLIENT_NAME, GENERATED_ENDPOINTS_TYPE_NAME } from './controllerReader.js';
+import type { ControllerContract, DeclaredScript, EndpointSignature, TypeDeclaration, TypeImportName } from './controllerReader.js';
 
 /**
- * Writes the generated modules. The client module holds the app declarations, every controller's
- * wire shapes and endpoint type, and a typed client for each controller the browser calls: one file,
- * so a DTO that references another controller's type resolves in place and the client never imports
- * from the api. The scripts module is the server-side map a repository passes to createSuiteletClient.
+ * Writes the generated modules. Each controller gets its own client module, `<name>.gen.ts`: the
+ * entity types it names (copied in, so the module stands on its own), its wire shapes, its endpoint
+ * type and, when the browser calls it, its client. The index module re-exports each one as a
+ * namespace, so a hook writes `user.api.roles()` and names a shape as `user.RolesResponse`. The
+ * scripts module is the server-side map a repository passes to createSuiteletClient.
  */
+
+/** The declarations copied from one inlined type file. */
+export interface InlinedTypeSection {
+    /** Where the declarations come from: the file's path relative to the project. */
+    sourceLabel: string;
+    declarations: TypeDeclaration[];
+}
 
 export interface EmittedController {
     contract: ControllerContract;
     /** Where the file's header points a reader: the controller's path relative to the project. */
     sourceLabel: string;
+    inlinedTypes: InlinedTypeSection[];
 }
 
-export interface EmitClientModuleOptions {
+export interface EmitControllerModuleOptions {
     clientModule: string;
+}
+
+export interface EmitClientIndexModuleOptions {
     /** How the header names the sources: `api/src/controllers`. */
     controllersLabel: string;
 }
@@ -29,8 +42,17 @@ export interface EmitAppModuleOptions {
     appLabel: string;
 }
 
+/** The index module of the client, next to the controller modules: what a hook imports. */
+export const CLIENT_INDEX_FILE_NAME = 'index.gen.ts';
+
+/** The client module of a controller: `user.gen.ts` for the user controller. */
+export function controllerModuleFileName(controllerName: string): string {
+    return `${controllerName}.gen.ts`;
+}
+
 const INDENT = '    ';
 const EDIT_NOTICE = 'Do not edit: change the controller and run `npm run generate`.';
+const ESLINT_DISABLE = '/* eslint-disable */';
 
 function indentJsDoc(jsDoc: string): string {
     return jsDoc
@@ -45,60 +67,82 @@ function emitEndpointMember(endpoint: EndpointSignature): string {
     return endpoint.jsDoc ? `${indentJsDoc(endpoint.jsDoc)}\n${member}` : member;
 }
 
-function emitTypeImports(controllers: EmittedController[]): string[] {
+function formatImportName(imported: TypeImportName): string {
+    return imported.alias ? `${imported.name} as ${imported.alias}` : imported.name;
+}
+
+/** One `import type` per module, names merged and sorted, modules sorted. */
+function emitTypeImports(imports: { moduleSpecifier: string; names: TypeImportName[] }[]): string[] {
     const namesByModule = new Map<string, Set<string>>();
-    for (const { contract } of controllers) {
-        for (const typeImport of contract.typeImports) {
-            const names = namesByModule.get(typeImport.moduleSpecifier) ?? new Set<string>();
-            typeImport.names.forEach((name) => names.add(name));
-            namesByModule.set(typeImport.moduleSpecifier, names);
-        }
+    for (const typeImport of imports) {
+        const names = namesByModule.get(typeImport.moduleSpecifier) ?? new Set<string>();
+        typeImport.names.forEach((imported) => names.add(formatImportName(imported)));
+        namesByModule.set(typeImport.moduleSpecifier, names);
     }
     return Array.from(namesByModule.keys())
         .sort()
         .map((moduleSpecifier) => `import type { ${Array.from(namesByModule.get(moduleSpecifier) ?? []).sort().join(', ')} } from '${moduleSpecifier}';`);
 }
 
-/** The script reference as a literal, as the client module and the scripts module write it. */
+/** The script reference as a literal, as the controller module and the scripts module write it. */
 function emitScriptRef(script: DeclaredScript): string {
     const browser = script.browser ? '' : ', browser: false';
     return `{ kind: '${script.kind}', scriptId: '${script.scriptId}', deployId: '${script.deployId}'${browser} }`;
 }
 
-function emitController({ contract, sourceLabel }: EmittedController): string {
+export function emitControllerModule({ contract, sourceLabel, inlinedTypes }: EmittedController, options: EmitControllerModuleOptions): string {
     const browser = contract.script.browser;
-    const sections: string[] = [`// ${contract.name} (${sourceLabel})${browser ? '' : ': called by server code only, so types only'}`];
+    const header = [
+        `// Generated by netsuite-api generate from ${sourceLabel}. ${EDIT_NOTICE}`,
+        ...(browser ? [] : ['// Called by server code only: its types, and no client.']),
+        ESLINT_DISABLE,
+    ];
+    const imports = [
+        ...(browser ? [`import { createApiClient } from '${options.clientModule}';`] : []),
+        ...emitTypeImports([
+            ...contract.carriedTypeImports,
+            ...contract.controllerTypeImports.map((typeImport) => ({ moduleSpecifier: `./${controllerModuleFileName(typeImport.controllerName).replace(/\.ts$/, '')}`, names: typeImport.names })),
+        ]),
+    ];
+    const sections: string[] = [header.join('\n'), imports.join('\n')];
+    for (const section of inlinedTypes) {
+        sections.push(`// Entity types from ${section.sourceLabel}, copied so this module stands on its own.`);
+        for (const declaration of section.declarations) sections.push(declaration.text);
+    }
     for (const declaration of contract.typeDeclarations) sections.push(declaration.text);
     const members = contract.endpoints.map(emitEndpointMember);
     // A type alias, not an interface: only an object type literal satisfies the Endpoints index signature.
-    sections.push(`export type ${contract.endpointsTypeName} = {\n${members.join('\n')}\n};`);
+    sections.push(`/** The endpoint signatures of the ${contract.name} controller, as its handlers declare them. */\nexport type ${GENERATED_ENDPOINTS_TYPE_NAME} = {\n${members.join('\n')}\n};`);
     if (browser) {
         const rawEndpoints = contract.endpoints.filter((endpoint) => endpoint.raw).map((endpoint) => `'${endpoint.name}'`);
         const clientOptions = rawEndpoints.length > 0 ? `, { rawEndpoints: [${rawEndpoints.join(', ')}] }` : '';
         sections.push(
-            `/** One typed function per endpoint of the ${contract.name} controller: \`${contract.clientName}.${contract.endpoints[0]?.name ?? 'endpoint'}(...)\`. */\n` +
-                `export const ${contract.clientName} = createApiClient<${contract.endpointsTypeName}>(${emitScriptRef({ ...contract.script, browser: true })}${clientOptions});`,
+            `/** One typed function per endpoint of the ${contract.name} controller: \`${contract.name}.${GENERATED_CLIENT_NAME}.${contract.endpoints[0]?.name ?? 'endpoint'}(...)\`. */\n` +
+                `export const ${GENERATED_CLIENT_NAME} = createApiClient<${GENERATED_ENDPOINTS_TYPE_NAME}>(${emitScriptRef({ ...contract.script, browser: true })}${clientOptions});`,
         );
     }
-    return sections.join('\n\n');
+    return `${sections.filter((section) => section !== '').join('\n\n')}\n`;
 }
 
-function sortControllers(controllers: EmittedController[]): EmittedController[] {
+export function sortControllers(controllers: EmittedController[]): EmittedController[] {
     return [...controllers].sort((left, right) => left.contract.name.localeCompare(right.contract.name));
 }
 
-export function emitClientModule(controllers: EmittedController[], options: EmitClientModuleOptions): string {
-    const ordered = sortControllers(controllers);
-    const anyBrowserFacing = ordered.some((controller) => controller.contract.script.browser);
-    const header = [`// Generated by netsuite-api generate from ${options.controllersLabel}. ${EDIT_NOTICE}`, '/* eslint-disable */'];
-    const imports = [...(anyBrowserFacing ? [`import { createApiClient } from '${options.clientModule}';`] : []), ...emitTypeImports(ordered)];
-    const body = ordered.map(emitController);
-    return `${[header.join('\n'), imports.join('\n'), ...body].filter((section) => section !== '').join('\n\n')}\n`;
+/** The index module: every controller module re-exported under the controller's name. */
+export function emitClientIndexModule(controllers: EmittedController[], options: EmitClientIndexModuleOptions): string {
+    const lines = [`// Generated by netsuite-api generate from ${options.controllersLabel}. Do not edit: change the controllers and run \`npm run generate\`.`, ESLINT_DISABLE, ''];
+    for (const { contract } of sortControllers(controllers)) {
+        const summary = contract.script.browser
+            ? `The ${contract.name} controller: its request and response types, and \`${contract.name}.${GENERATED_CLIENT_NAME}\`, one typed function per endpoint.`
+            : `The ${contract.name} controller: its request and response types only; server code calls it, the browser does not.`;
+        lines.push(`/** ${summary} */`, `export * as ${contract.name} from './${controllerModuleFileName(contract.name).replace(/\.ts$/, '')}';`);
+    }
+    return `${lines.join('\n')}\n`;
 }
 
 /** The app file as the client sees it: its exported declarations, verbatim. */
 export function emitAppModule(appDeclarations: string[], options: EmitAppModuleOptions): string {
-    const header = [`// Generated by netsuite-api generate from ${options.appLabel}. Do not edit: change ${options.appLabel} and run \`npm run generate\`.`, '/* eslint-disable */'];
+    const header = [`// Generated by netsuite-api generate from ${options.appLabel}. Do not edit: change ${options.appLabel} and run \`npm run generate\`.`, ESLINT_DISABLE];
     return `${[header.join('\n'), ...appDeclarations].join('\n\n')}\n`;
 }
 
@@ -107,7 +151,7 @@ export function emitScriptsModule(controllers: EmittedController[], options: Emi
     const entries = ordered.map(({ contract }) => `${INDENT}${contract.name}: ${emitScriptRef(contract.script)},`);
     return [
         `// Generated by netsuite-api generate from ${options.controllersLabel}. ${EDIT_NOTICE}`,
-        '/* eslint-disable */',
+        ESLINT_DISABLE,
         '',
         `import type { ScriptRef } from '${options.wireModule}';`,
         '',

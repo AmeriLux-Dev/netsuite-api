@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { isControllerFileName, readControllerContract, toPascalCase } from '../../tooling/controllerReader.js';
+import { isControllerFileName, readControllerContract } from '../../tooling/controllerReader.js';
 import { userControllerSource, userRolesControllerSource } from './fixtures.js';
 
-const options = { typeImports: { '../types/models.gen': './models.gen', '@amerilux/netsuite-api/server': '@amerilux/netsuite-api/client' } };
+const options = { typeImports: { '@amerilux/netsuite-api/server': '@amerilux/netsuite-api/client' }, inlineTypes: { '../types/models.gen': 'api/src/types/models.gen.ts' } };
 
 const restletHeader = `/**
  * @NApiVersion 2.1
@@ -19,51 +19,52 @@ function messages(source: string, filePath = 'api/src/controllers/thingControlle
     return readControllerContract(filePath, source, options).problems.map((problem) => problem.message);
 }
 
-describe('isControllerFileName and toPascalCase', () => {
+describe('isControllerFileName', () => {
     it('accepts <camelName>Controller.ts only', () => {
         expect(isControllerFileName('userController.ts')).toBe(true);
         expect(isControllerFileName('userRolesController.ts')).toBe(true);
         expect(isControllerFileName('UserController.ts')).toBe(false);
         expect(isControllerFileName('userService.ts')).toBe(false);
-        expect(toPascalCase('userRoles')).toBe('UserRoles');
     });
 });
 
 describe('readControllerContract', () => {
-    it('reads the script declaration, the exported types, the endpoint signatures and the carried type imports', () => {
+    it('reads the script declaration, the exported types, the endpoint signatures and the inlined type imports', () => {
         const { contract, problems } = readControllerContract('api/src/controllers/userRolesController.ts', userRolesControllerSource, options);
         expect(problems).toEqual([]);
         expect(contract).toMatchObject({
             name: 'userRoles',
-            endpointsTypeName: 'UserRolesEndpoints',
-            clientName: 'userRolesApi',
             script: { kind: 'suitelet', scriptId: 'customscript_demo_user_roles', deployId: 'customdeploy_demo_user_roles', browser: false },
-            typeImports: [{ moduleSpecifier: './models.gen', names: ['EmployeeRole'] }],
+            carriedTypeImports: [],
+            inlinedTypeImports: [{ specifier: '../types/models.gen', names: [{ name: 'EmployeeRole' }] }],
+            controllerTypeImports: [],
         });
-        expect(contract?.typeDeclarations.map((declaration) => declaration.name)).toEqual(['RoleSummary', 'UserRolesByEmployeeRequest', 'UserRolesByEmployeeResponse']);
+        expect(contract?.typeDeclarations.map((declaration) => declaration.name)).toEqual(['RoleSummary', 'ByEmployeeRequest', 'ByEmployeeResponse']);
         expect(contract?.typeDeclarations[0].text).toBe(
             "/** A role as the wire carries it: picked from the generated entity type so it follows the model. */\nexport type RoleSummary = Pick<EmployeeRole, 'roleId' | 'roleName'>;",
         );
         expect(contract?.endpoints).toEqual([
             {
                 name: 'byEmployee',
-                requestType: 'UserRolesByEmployeeRequest',
+                requestType: 'ByEmployeeRequest',
                 requestOptional: false,
-                responseType: 'UserRolesByEmployeeResponse',
+                responseType: 'ByEmployeeResponse',
                 raw: false,
                 jsDoc: '/**\n     * Every role assigned to the employee; the service answers 400 for a bad id.\n     */',
             },
         ]);
     });
 
-    it('reads a Restlet, drops a type import from a sibling controller and skips the typeof alias of the endpoints', () => {
+    it('reads a Restlet, resolves a type import from a sibling controller and skips the typeof alias of the endpoints', () => {
         const { contract, problems } = readControllerContract('api/src/controllers/userController.ts', userControllerSource, options);
         expect(problems).toEqual([]);
         expect(contract?.script).toEqual({ kind: 'restlet', scriptId: 'customscript_demo_user', deployId: 'customdeploy_demo_user', browser: true });
-        expect(contract?.typeImports).toEqual([]);
-        expect(contract?.typeDeclarations.map((declaration) => declaration.name)).toEqual(['ActiveUserSummary', 'UserRolesResponse']);
+        expect(contract?.carriedTypeImports).toEqual([]);
+        expect(contract?.inlinedTypeImports).toEqual([]);
+        expect(contract?.controllerTypeImports).toEqual([{ controllerName: 'userRoles', names: [{ name: 'RoleSummary' }] }]);
+        expect(contract?.typeDeclarations.map((declaration) => declaration.name)).toEqual(['ActiveUserSummary', 'RolesResponse']);
         expect(contract?.endpoints).toEqual([
-            { name: 'roles', requestType: undefined, requestOptional: false, responseType: 'UserRolesResponse', raw: false, jsDoc: '/** The caller and every role assigned to them. Takes no request; the session says who is calling. */' },
+            { name: 'roles', requestType: undefined, requestOptional: false, responseType: 'RolesResponse', raw: false, jsDoc: '/** The caller and every role assigned to them. Takes no request; the session says who is calling. */' },
         ]);
     });
 
@@ -115,18 +116,20 @@ export const thingEndpoints = defineEndpoints({
         ]);
     });
 
-    it('requires every type to be exported and written out', () => {
+    it('requires every type to be exported, written out, and not named after the generated endpoint type', () => {
         const source = thingController(`
 interface Hidden { a: 1 }
 export type Copied = typeof something;
+export interface Endpoints { a: 1 }
 export const thingEndpoints = defineEndpoints({ list: (): Hidden[] => [] });`);
         expect(messages(source)).toEqual([
             "'Hidden' is not exported; every type in a controller is a wire shape, so export it (or move it below the controller).",
             "type 'Copied' is a typeof; a wire shape is written out as an interface or a type alias.",
+            "type 'Endpoints' is the name the generated module gives the endpoint signatures; call the wire shape something else.",
         ]);
     });
 
-    it('rejects a type imported from anywhere but the carried modules or a sibling controller', () => {
+    it('rejects a type imported from anywhere but the inlined files, the carried modules or a sibling controller', () => {
         const source = thingController(`
 import type { Thing } from '../services/thingService';
 import { type Other, doIt } from '../repositories/thingRepository';
@@ -148,16 +151,16 @@ export const thingEndpoints = defineEndpoints({
 });`);
         const { contract, problems } = readControllerContract('api/src/controllers/thingController.ts', source, options);
         expect(problems).toEqual([]);
-        expect(contract?.typeImports).toEqual([{ moduleSpecifier: '@amerilux/netsuite-api/client', names: ['RawResponse'] }]);
+        expect(contract?.carriedTypeImports).toEqual([{ moduleSpecifier: '@amerilux/netsuite-api/client', names: [{ name: 'RawResponse' }] }]);
         expect(contract?.endpoints.map((endpoint) => [endpoint.name, endpoint.raw])).toEqual([['csv', true], ['rows', false]]);
     });
 
-    it('carries a renamed type import under the client specifier', () => {
+    it('reads a renamed type import with its alias', () => {
         const source = thingController(`
 import type { Employee as EmployeeRecord } from '../types/models.gen';
 export const thingEndpoints = defineEndpoints({ me: (): EmployeeRecord => ({} as EmployeeRecord) });`);
-        expect(readControllerContract('api/src/controllers/thingController.ts', source, options).contract?.typeImports).toEqual([
-            { moduleSpecifier: './models.gen', names: ['Employee as EmployeeRecord'] },
+        expect(readControllerContract('api/src/controllers/thingController.ts', source, options).contract?.inlinedTypeImports).toEqual([
+            { specifier: '../types/models.gen', names: [{ name: 'Employee', alias: 'EmployeeRecord' }] },
         ]);
     });
 

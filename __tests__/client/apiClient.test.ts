@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ScriptRef } from '../../src/index.js';
-import { ApiClientError, buildApiUrl, callEndpoint, callRawEndpoint, configureApiClient, createApiClient } from '../../src/client/index.js';
-import type { RawResponse } from '../../src/client/index.js';
+import { ApiClientError, NO_RESPONSE_STATUS, buildApiUrl, callEndpoint, callRawEndpoint, configureApiClient, createApiClient } from '../../src/client/index.js';
+import type { ApiErrorHandler, RawResponse } from '../../src/client/index.js';
 
 const userScript: ScriptRef = { kind: 'restlet', scriptId: 'customscript_test_user', deployId: 'customdeploy_test_user' };
 
@@ -114,5 +114,68 @@ describe('callRawEndpoint', () => {
         await expect(callRawEndpoint(userScript, 'csv')).rejects.toMatchObject({ status: 200, message: expect.stringContaining('answered JSON') });
         mockFetchResponse(502, '<html>gateway</html>', 'text/html');
         await expect(callRawEndpoint(userScript, 'csv')).rejects.toMatchObject({ status: 502 });
+    });
+});
+
+describe('the configured error handler', () => {
+    function handler() {
+        const onError = vi.fn<ApiErrorHandler>();
+        configureApiClient({ onError });
+        return onError;
+    }
+
+    it('is told about a failed call, with the call\'s context, before the call rejects', async () => {
+        const onError = handler();
+        mockFetchResponse(200, { status: 404, error: 'Customer not found', data: null });
+        await expect(callEndpoint(userScript, 'byId', { id: 9 })).rejects.toMatchObject({ status: 404 });
+        expect(onError).toHaveBeenCalledTimes(1);
+        const [error, context] = onError.mock.calls[0];
+        expect(error).toBeInstanceOf(ApiClientError);
+        expect(error.message).toBe('Customer not found');
+        expect(context).toEqual({ scriptRef: userScript, endpoint: 'byId', request: { id: 9 } });
+    });
+
+    it('is told about a raw endpoint that fails, and a client built by createApiClient reports the same way', async () => {
+        const onError = handler();
+        mockFetchResponse(200, { status: 403, error: 'Not permitted', data: null });
+        await expect(callRawEndpoint(userScript, 'csv', { month: '2026-09' })).rejects.toMatchObject({ status: 403 });
+        expect(onError).toHaveBeenLastCalledWith(expect.objectContaining({ status: 403 }), { scriptRef: userScript, endpoint: 'csv', request: { month: '2026-09' } });
+
+        type PingEndpoints = { ping: (request: { value: number }) => { echoed: number } };
+        mockFetchResponse(500, '<html>login</html>');
+        await expect(createApiClient<PingEndpoints>(userScript).ping({ value: 1 })).rejects.toMatchObject({ status: 500 });
+        expect(onError).toHaveBeenCalledTimes(2);
+    });
+
+    it('is left out when the call passes handleError: false, which still rejects', async () => {
+        const onError = handler();
+        mockFetchResponse(200, { status: 400, error: 'employeeId must be a positive whole number.', data: null });
+        await expect(callEndpoint(userScript, 'byEmployee', { employeeId: 0 }, { handleError: false })).rejects.toMatchObject({ status: 400 });
+        expect(onError).not.toHaveBeenCalled();
+    });
+
+    it('never hears about an aborted call, which rejects with the abort itself', async () => {
+        const onError = handler();
+        vi.stubGlobal('fetch', vi.fn(async () => { throw new DOMException('The operation was aborted.', 'AbortError'); }));
+        await expect(callEndpoint(userScript, 'list')).rejects.toMatchObject({ name: 'AbortError' });
+        expect(onError).not.toHaveBeenCalled();
+    });
+
+    it('sees a call that got no answer as an ApiClientError with the no-response status', async () => {
+        const onError = handler();
+        vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
+        const failure = await callEndpoint(userScript, 'list').catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(ApiClientError);
+        expect(failure).toMatchObject({ status: NO_RESPONSE_STATUS, message: 'Could not reach customscript_test_user.list: Failed to fetch' });
+        expect((failure as ApiClientError).details).toBeInstanceOf(TypeError);
+        expect(onError).toHaveBeenCalledWith(failure, { scriptRef: userScript, endpoint: 'list', request: {} });
+    });
+
+    it('is forgotten by a configureApiClient call that leaves it out', async () => {
+        const onError = handler();
+        configureApiClient({ basePaths: { restlet: '/api/restlet' } });
+        mockFetchResponse(200, { status: 404, error: 'gone', data: null });
+        await expect(callEndpoint(userScript, 'byId', { id: 1 })).rejects.toMatchObject({ status: 404 });
+        expect(onError).not.toHaveBeenCalled();
     });
 });

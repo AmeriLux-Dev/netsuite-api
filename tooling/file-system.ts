@@ -5,6 +5,8 @@ import * as nodePath from 'node:path';
 export interface FileSystemAdapter {
     readTextFile(filePath: string): string;
     writeTextFile(filePath: string, content: string): void;
+    /** Removes a file; a file that does not exist is nothing to do. */
+    deleteFile(filePath: string): void;
     fileExists(filePath: string): boolean;
     ensureDirectory(directoryPath: string): void;
     /** Lists the absolute paths of the files directly inside a directory. Returns [] when it does not exist. */
@@ -19,6 +21,7 @@ export function createNodeFileSystemAdapter(): FileSystemAdapter {
     return {
         readTextFile: (filePath) => nodeFileSystem.readFileSync(filePath, 'utf8'),
         writeTextFile: (filePath, content) => nodeFileSystem.writeFileSync(filePath, content, 'utf8'),
+        deleteFile: (filePath) => nodeFileSystem.rmSync(filePath, { force: true }),
         fileExists: (filePath) => nodeFileSystem.existsSync(filePath),
         ensureDirectory: (directoryPath) => nodeFileSystem.mkdirSync(directoryPath, { recursive: true }),
         listFiles: (directoryPath) => {
@@ -54,6 +57,9 @@ export function createInMemoryFileSystemAdapter(initialFiles: Record<string, str
         },
         writeTextFile: (filePath, content) => {
             files.set(normalizeKey(filePath), content);
+        },
+        deleteFile: (filePath) => {
+            files.delete(normalizeKey(filePath));
         },
         fileExists: (filePath) => files.has(normalizeKey(filePath)) || directories.has(normalizeKey(filePath)),
         ensureDirectory: (directoryPath) => {
