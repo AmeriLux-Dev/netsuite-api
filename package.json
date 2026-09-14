@@ -1,0 +1,77 @@
+{
+  "name": "@amerilux/netsuite-api",
+  "version": "0.1.0",
+  "private": false,
+  "description": "The API layer for a NetSuite single-page app: endpoints served by a Restlet or a Suitelet, a typed browser client, SuiteScript module stubs for tests, and a generator that writes the client module from the controllers.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AmeriLux-Dev/netsuite-api.git"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "default": "./dist/server/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
+    },
+    "./cli": {
+      "types": "./dist-tooling/index.d.ts",
+      "default": "./dist-tooling/index.js"
+    }
+  },
+  "bin": {
+    "netsuite-api": "dist-tooling/cli/bin.js"
+  },
+  "files": [
+    "dist",
+    "dist-tooling",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "npm run build:runtime && npm run build:tooling",
+    "build:runtime": "tsc -p tsconfig.build.json",
+    "build:tooling": "tsc -p tsconfig.tooling.json",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.tooling.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "typescript": ">=5.0",
+    "vitest": ">=3.0"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    },
+    "vitest": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@hitc/netsuite-types": "^2026.2.2",
+    "@types/node": "^22.20.2",
+    "typescript": "~5.9.3",
+    "vitest": "^5.0.0"
+  },
+  "publishConfig": {
+    "tag": "latest",
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

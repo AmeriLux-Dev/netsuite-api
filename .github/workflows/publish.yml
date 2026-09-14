@@ -1,0 +1,52 @@
+name: Publish to npm
+
+# Tag v<version> (matching package.json) to publish. Creating a GitHub release creates the tag, so
+# either path starts a run.
+#
+# A tag-triggered run uses this file as it exists at the tagged commit. If the workflow itself needs
+# fixing, push the fix to main and run this workflow manually with the tag to publish: the manual run
+# uses this file from main but builds and publishes the tagged commit, so the tag never moves.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to publish, e.g. v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      # Trusted publishing (OIDC) needs npm >= 11.5.1; the Node 22 runner ships npm 10.
+      - run: npm install -g npm@latest
+      - run: npm --version
+      - run: npm ci
+      - name: Tag matches package.json version
+        run: |
+          TAG="${RELEASE_TAG#v}"
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "Tag v$TAG does not match package.json version $VERSION"; exit 1
+          fi
+          echo "Publishing $RELEASE_TAG"
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+      - run: npm publish

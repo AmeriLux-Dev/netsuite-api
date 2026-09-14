@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "rootDir": "tooling",
+    "outDir": "dist-tooling"
+  },
+  "include": ["tooling/**/*.ts"]
+}
