@@ -42,7 +42,7 @@ describe('readEndpointCall', () => {
 });
 
 describe('defineRestlet', () => {
-    const post = defineRestlet('things', thingsEndpoints);
+    const post = defineRestlet({ name: 'things', scriptId: 'customscript_test_things', deployId: 'customdeploy_test_things' }, thingsEndpoints);
 
     beforeEach(() => {
         vi.mocked(log.audit).mockClear();

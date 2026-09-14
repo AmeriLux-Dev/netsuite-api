@@ -5,4 +5,4 @@
 export { ApiClientError, NETSUITE_API_BASE_PATHS, buildApiUrl, callEndpoint, configureApiClient, createApiClient } from './apiClient.js';
 export type { ApiBasePaths, ApiCallOptions, ApiClient, ApiClientConfiguration } from './apiClient.js';
 export { ENDPOINT_PARAMETER } from '../index.js';
-export type { ApiEnvelope, ApiErrorBody, Endpoint, Endpoints, EndpointRequest, EndpointResponse, ScriptKind, ScriptRef } from '../index.js';
+export type { ApiEnvelope, ApiErrorBody, Endpoint, Endpoints, EndpointRequest, EndpointResponse, ScriptDeclaration, ScriptKind, ScriptRef } from '../index.js';

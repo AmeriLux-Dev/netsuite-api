@@ -42,15 +42,36 @@ export type EndpointResponse<TEndpoint extends Endpoint> = ReturnType<TEndpoint>
 /** How a script is reached over HTTP; the client builds the URL from it. */
 export type ScriptKind = 'restlet' | 'suitelet';
 
-/** One deployed script of the application, as the `scripts` map of the project declares it. */
+/**
+ * What a controller declares about the script that serves it, passed to defineRestlet or
+ * defineSuitelet. Nothing here creates or deploys anything: the controller builds, tests and bundles
+ * before a script record exists. The ids are how a client reaches the controller once it is deployed,
+ * so they are set to whatever the script record and its deployment are called in NetSuite (and in
+ * the SDF object under netsuite/Objects); the generator wires every client to them as long as they
+ * match.
+ */
+export interface ScriptDeclaration {
+    /** The controller's name, as the logs and the generated clients call it: `user` for userController.ts. */
+    name: string;
+    /**
+     * The script record's id, `customscript_<prefix>_<name>`. Change it freely to match the record in
+     * NetSuite; the generated clients follow.
+     */
+    scriptId: string;
+    /** The deployment's id, `customdeploy_<prefix>_<name>`, with the same freedom as scriptId. */
+    deployId: string;
+    /**
+     * False when only server code calls the script (a Suitelet deployed to run as another role, called
+     * through the Suitelet client). The generator then emits the controller's types but no browser
+     * client. Defaults to true.
+     */
+    browser?: boolean;
+}
+
+/** One deployed script as a client reaches it: the declaration plus how it is served. */
 export interface ScriptRef {
     kind: ScriptKind;
     scriptId: string;
     deployId: string;
-    /**
-     * False when only server code calls the script (a Suitelet deployed to run as another role, called
-     * through the Suitelet client). The client generator then emits the controller's types but no client.
-     * Defaults to true.
-     */
     browser?: boolean;
 }

@@ -23,7 +23,7 @@ const endpoints = defineEndpoints({
 });
 
 describe('defineSuitelet', () => {
-    const suitelet = defineSuitelet('things', endpoints);
+    const suitelet = defineSuitelet({ name: 'things', scriptId: 'customscript_test_things', deployId: 'customdeploy_test_things', browser: false }, endpoints);
 
     it('serves a POST from the JSON body, endpoint name included, as a JSON envelope', () => {
         const { context, setHeader, written } = createSuiteletContext('POST', '{"endpoint":"byId","id":"7"}');

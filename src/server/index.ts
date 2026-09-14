@@ -15,4 +15,4 @@ export type { SuiteletClient } from './suiteletClient.js';
 export { findFileId, findFolderId, getFileUrlByName } from './fileCabinet.js';
 export type { FileCabinetLocation } from './fileCabinet.js';
 export { ENDPOINT_PARAMETER } from '../index.js';
-export type { ApiEnvelope, ApiErrorBody, Endpoint, Endpoints, EndpointRequest, EndpointResponse, ScriptKind, ScriptRef } from '../index.js';
+export type { ApiEnvelope, ApiErrorBody, Endpoint, Endpoints, EndpointRequest, EndpointResponse, ScriptDeclaration, ScriptKind, ScriptRef } from '../index.js';
