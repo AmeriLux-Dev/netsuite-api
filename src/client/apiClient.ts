@@ -1,4 +1,4 @@
-import { ENDPOINT_PARAMETER, type ApiEnvelope, type EndpointRequest, type EndpointResponse, type Endpoints, type ScriptKind, type ScriptRef } from '../index.js';
+import { ENDPOINT_PARAMETER, type ApiEnvelope, type EndpointRequest, type EndpointResponse, type Endpoints, type RawResponse, type ScriptKind, type ScriptRef } from '../index.js';
 
 /**
  * Calls an API controller by its script and deployment ids, one endpoint at a time. The entry's
@@ -47,25 +47,32 @@ export function buildApiUrl(scriptRef: ScriptRef): string {
     return `${configuredBasePaths[scriptRef.kind]}?${parameters.toString()}`;
 }
 
-/** Calls one endpoint of a controller: a POST whose JSON body carries the request and the endpoint name. */
-export async function callEndpoint<TData>(scriptRef: ScriptRef, endpointName: string, request: object = {}, options: ApiCallOptions = {}): Promise<TData> {
-    const response = await fetch(buildApiUrl(scriptRef), {
+/** The POST every call is: the request plus the endpoint name, as JSON. */
+function postEndpoint(scriptRef: ScriptRef, endpointName: string, request: object, options: ApiCallOptions): Promise<Response> {
+    return fetch(buildApiUrl(scriptRef), {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ ...request, [ENDPOINT_PARAMETER]: endpointName }),
         signal: options.signal,
     });
+}
 
-    let envelope: ApiEnvelope<TData> | undefined;
-    const text = await response.text();
+function parseEnvelope<TData>(text: string): ApiEnvelope<TData> | undefined {
     try {
-        envelope = text ? (JSON.parse(text) as ApiEnvelope<TData>) : undefined;
+        const parsed: unknown = text ? JSON.parse(text) : undefined;
+        return parsed && typeof parsed === 'object' && 'status' in parsed ? (parsed as ApiEnvelope<TData>) : undefined;
     } catch {
-        envelope = undefined;
+        return undefined;
     }
+}
 
-    if (!envelope || typeof envelope !== 'object' || !('status' in envelope)) {
+/** Calls one endpoint of a controller: a POST whose JSON body carries the request and the endpoint name. */
+export async function callEndpoint<TData>(scriptRef: ScriptRef, endpointName: string, request: object = {}, options: ApiCallOptions = {}): Promise<TData> {
+    const response = await postEndpoint(scriptRef, endpointName, request, options);
+    const text = await response.text();
+    const envelope = parseEnvelope<TData>(text);
+    if (!envelope) {
         throw new ApiClientError(response.status, `Unexpected response from ${scriptRef.scriptId} (${response.status})`, text.slice(0, 500));
     }
     if (envelope.error !== null || envelope.status >= 400) {
@@ -75,23 +82,52 @@ export async function callEndpoint<TData>(scriptRef: ScriptRef, endpointName: st
 }
 
 /**
- * One function per endpoint, typed by the controller's handlers: `userApi.roles()`,
- * `ordersApi.byId({ id })`. The request comes first, the call options second.
+ * Calls an endpoint that answers with a document instead of the envelope (a Suitelet handler returning
+ * rawResponse) and resolves to its body as a Blob. A failure still arrives as an envelope, and is
+ * thrown as an ApiClientError with its status.
  */
-export type ApiClient<TEndpoints extends Endpoints> = {
-    readonly [TName in keyof TEndpoints]: (request: EndpointRequest<TEndpoints[TName]>, options?: ApiCallOptions) => Promise<EndpointResponse<TEndpoints[TName]>>;
-};
+export async function callRawEndpoint(scriptRef: ScriptRef, endpointName: string, request: object = {}, options: ApiCallOptions = {}): Promise<Blob> {
+    const response = await postEndpoint(scriptRef, endpointName, request, options);
+    const contentType = response.headers.get('Content-Type') ?? '';
+    if (!response.ok || contentType.includes('application/json')) {
+        const text = await response.text();
+        const envelope = parseEnvelope<unknown>(text);
+        if (envelope && (envelope.error !== null || envelope.status >= 400)) throw new ApiClientError(envelope.status, envelope.error ?? `Request failed (${envelope.status})`);
+        if (!response.ok) throw new ApiClientError(response.status, `Unexpected response from ${scriptRef.scriptId} (${response.status})`, text.slice(0, 500));
+        throw new ApiClientError(response.status, `${scriptRef.scriptId}.${endpointName} answered JSON where a document was expected.`, text.slice(0, 500));
+    }
+    return response.blob();
+}
+
+/** What the client resolves to for an endpoint's response type: a Blob for a raw answer, the data otherwise. */
+export type ClientResponse<TResponse> = TResponse extends RawResponse ? Blob : TResponse;
 
 /**
- * Builds the typed client for a controller from its scripts entry: `createApiClient<UserEndpoints>(scripts.user)`.
+ * One function per endpoint, typed by the controller's handlers: `userApi.roles()`,
+ * `ordersApi.byId({ id })`, `exportsApi.csv({ month })` resolving to a Blob. The request comes first,
+ * the call options second.
+ */
+export type ApiClient<TEndpoints extends Endpoints> = {
+    readonly [TName in keyof TEndpoints]: (request: EndpointRequest<TEndpoints[TName]>, options?: ApiCallOptions) => Promise<ClientResponse<EndpointResponse<TEndpoints[TName]>>>;
+};
+
+export interface ApiClientOptions {
+    /** The endpoints that answer with a document: the generator lists every handler whose return type is RawResponse. */
+    rawEndpoints?: readonly string[];
+}
+
+/**
+ * Builds the typed client for a controller from its script: `createApiClient<UserEndpoints>({ kind, scriptId, deployId })`.
  * The endpoint names come from the type alone; the property accessed is the endpoint named on the wire.
  * The generated client module of a project calls this once per browser-facing controller.
  */
-export function createApiClient<TEndpoints extends Endpoints>(scriptRef: ScriptRef): ApiClient<TEndpoints> {
+export function createApiClient<TEndpoints extends Endpoints>(scriptRef: ScriptRef, clientOptions: ApiClientOptions = {}): ApiClient<TEndpoints> {
+    const rawEndpoints = new Set(clientOptions.rawEndpoints ?? []);
     return new Proxy({} as ApiClient<TEndpoints>, {
         get(_target, endpointName) {
             if (typeof endpointName !== 'string') return undefined;
-            return (request: unknown, options?: ApiCallOptions) => callEndpoint(scriptRef, endpointName, (request ?? {}) as object, options);
+            const call = rawEndpoints.has(endpointName) ? callRawEndpoint : callEndpoint;
+            return (request: unknown, options?: ApiCallOptions) => call(scriptRef, endpointName, (request ?? {}) as object, options);
         },
     });
 }

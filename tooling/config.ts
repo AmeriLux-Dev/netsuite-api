@@ -22,8 +22,9 @@ export interface ClientGeneratorConfig {
     wireModule: string;
     /**
      * Type imports a controller may carry into the client module, as the specifier written in the
-     * controller mapped to the specifier the client resolves: the generated entity types, typically. A
-     * type imported from any other module is an error, because the client could not resolve it.
+     * controller mapped to the specifier the client resolves: the generated entity types, and the
+     * package's server entry mapped to its client entry (for `RawResponse`). A type imported from any
+     * other module is an error, because the client could not resolve it.
      */
     typeImports: Record<string, string>;
     /** Files copied into the client as they are, source to destination: the generated entity types the carried imports point at. */
@@ -45,7 +46,7 @@ export const defaultClientGeneratorConfig: ClientGeneratorConfig = {
     scriptsOutFile: 'api/src/scripts.gen.ts',
     clientModule: '@amerilux/netsuite-api/client',
     wireModule: '@amerilux/netsuite-api',
-    typeImports: { '../types/models.gen': './models.gen' },
+    typeImports: { '../types/models.gen': './models.gen', '@amerilux/netsuite-api/server': '@amerilux/netsuite-api/client' },
     copyFiles: { 'api/src/types/models.gen.ts': 'client/src/api/models.gen.ts' },
 };
 

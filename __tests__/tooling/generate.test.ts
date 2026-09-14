@@ -55,6 +55,26 @@ describe('planClientGeneration', () => {
         expect(plan.files[2].content).toContain("user: { kind: 'restlet', scriptId: 'customscript_demo_user', deployId: 'customdeploy_demo_user', browser: false },");
     });
 
+    it('lists the raw endpoints on the client and imports RawResponse from the client entry', () => {
+        const documentsController = `/**
+ * @NScriptType Suitelet
+ */
+import type { RawResponse } from '@amerilux/netsuite-api/server';
+import { defineEndpoints, defineSuitelet, rawResponse } from '@amerilux/netsuite-api/server';
+export const documentsEndpoints = defineEndpoints({
+    csv: (request: { month: string }): RawResponse => rawResponse({ contentType: 'text/csv', body: request.month }),
+    months: (): string[] => [],
+});
+export type DocumentsEndpoints = typeof documentsEndpoints;
+export const onRequest = defineSuitelet({ name: 'documents', scriptId: 'customscript_demo_documents', deployId: 'customdeploy_demo_documents' }, documentsEndpoints);
+`;
+        const plan = planClientGeneration(optionsFor(projectFiles({ [nodePath.join(controllersDirectory, 'documentsController.ts')]: documentsController })));
+        expect(plan.problems).toEqual([]);
+        expect(plan.files[0].content).toContain("import type { RawResponse } from '@amerilux/netsuite-api/client';");
+        expect(plan.files[0].content).toContain('    csv: (request: { month: string }) => RawResponse;');
+        expect(plan.files[0].content).toContain("export const documentsApi = createApiClient<DocumentsEndpoints>({ kind: 'suitelet', scriptId: 'customscript_demo_documents', deployId: 'customdeploy_demo_documents' }, { rawEndpoints: ['csv'] });");
+    });
+
     it('reports a missing app file, a missing models file and an empty controllers folder', () => {
         const problems = planClientGeneration(optionsFor(projectFiles({
             [nodePath.join(projectRoot, 'netsuite.ts')]: undefined,
@@ -116,11 +136,11 @@ describe('loadClientGeneratorConfig', () => {
         expect(withoutConfig).toEqual({ ...defaultClientGeneratorConfig, rootDirectory: projectRoot });
 
         const configPath = nodePath.join(projectRoot, 'netsuite-api.config.json');
-        const fileSystem = createInMemoryFileSystemAdapter({ [configPath]: JSON.stringify({ outFile: 'client/src/generated/api.ts', typeImports: { '../types/models.gen': './models.gen', '@shared/types': '@shared/types' } }) });
+        const fileSystem = createInMemoryFileSystemAdapter({ [configPath]: JSON.stringify({ outFile: 'client/src/generated/api.ts', typeImports: { '@shared/types': '@shared/types' } }) });
         expect(loadClientGeneratorConfig(fileSystem, projectRoot)).toEqual({
             ...defaultClientGeneratorConfig,
             outFile: 'client/src/generated/api.ts',
-            typeImports: { '../types/models.gen': './models.gen', '@shared/types': '@shared/types' },
+            typeImports: { '@shared/types': '@shared/types' },
             rootDirectory: projectRoot,
         });
     });

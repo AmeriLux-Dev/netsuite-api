@@ -73,9 +73,11 @@ function emitController({ contract, sourceLabel }: EmittedController): string {
     // A type alias, not an interface: only an object type literal satisfies the Endpoints index signature.
     sections.push(`export type ${contract.endpointsTypeName} = {\n${members.join('\n')}\n};`);
     if (browser) {
+        const rawEndpoints = contract.endpoints.filter((endpoint) => endpoint.raw).map((endpoint) => `'${endpoint.name}'`);
+        const clientOptions = rawEndpoints.length > 0 ? `, { rawEndpoints: [${rawEndpoints.join(', ')}] }` : '';
         sections.push(
             `/** One typed function per endpoint of the ${contract.name} controller: \`${contract.clientName}.${contract.endpoints[0]?.name ?? 'endpoint'}(...)\`. */\n` +
-                `export const ${contract.clientName} = createApiClient<${contract.endpointsTypeName}>(${emitScriptRef({ ...contract.script, browser: true })});`,
+                `export const ${contract.clientName} = createApiClient<${contract.endpointsTypeName}>(${emitScriptRef({ ...contract.script, browser: true })}${clientOptions});`,
         );
     }
     return sections.join('\n\n');

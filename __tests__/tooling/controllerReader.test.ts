@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { isControllerFileName, readControllerContract, toPascalCase } from '../../tooling/controllerReader.js';
 import { userControllerSource, userRolesControllerSource } from './fixtures.js';
 
-const options = { typeImports: { '../types/models.gen': './models.gen' } };
+const options = { typeImports: { '../types/models.gen': './models.gen', '@amerilux/netsuite-api/server': '@amerilux/netsuite-api/client' } };
 
 const restletHeader = `/**
  * @NApiVersion 2.1
@@ -50,6 +50,7 @@ describe('readControllerContract', () => {
                 requestType: 'UserRolesByEmployeeRequest',
                 requestOptional: false,
                 responseType: 'UserRolesByEmployeeResponse',
+                raw: false,
                 jsDoc: '/**\n     * Every role assigned to the employee; the service answers 400 for a bad id.\n     */',
             },
         ]);
@@ -62,7 +63,7 @@ describe('readControllerContract', () => {
         expect(contract?.typeImports).toEqual([]);
         expect(contract?.typeDeclarations.map((declaration) => declaration.name)).toEqual(['ActiveUserSummary', 'UserRolesResponse']);
         expect(contract?.endpoints).toEqual([
-            { name: 'roles', requestType: undefined, requestOptional: false, responseType: 'UserRolesResponse', jsDoc: '/** The caller and every role assigned to them. Takes no request; the session says who is calling. */' },
+            { name: 'roles', requestType: undefined, requestOptional: false, responseType: 'UserRolesResponse', raw: false, jsDoc: '/** The caller and every role assigned to them. Takes no request; the session says who is calling. */' },
         ]);
     });
 
@@ -81,8 +82,8 @@ export const thingEndpoints = defineEndpoints({
         const { contract, problems } = readControllerContract('api/src/controllers/thingController.ts', source, options);
         expect(problems).toEqual([]);
         expect(contract?.endpoints).toEqual([
-            { name: 'list', requestType: 'Filter', requestOptional: true, responseType: 'string[]', jsDoc: undefined },
-            { name: 'count', requestType: 'Filter', requestOptional: false, responseType: 'number', jsDoc: undefined },
+            { name: 'list', requestType: 'Filter', requestOptional: true, responseType: 'string[]', raw: false, jsDoc: undefined },
+            { name: 'count', requestType: 'Filter', requestOptional: false, responseType: 'number', raw: false, jsDoc: undefined },
         ]);
     });
 
@@ -132,10 +133,23 @@ import { type Other, doIt } from '../repositories/thingRepository';
 import type * as Models from '../types/models.gen';
 export const thingEndpoints = defineEndpoints({ list: (): Thing[] => doIt() });`);
         expect(messages(source)).toEqual([
-            "type Thing is imported from '../services/thingService'; a controller's wire shapes may only take types from '../types/models.gen' or from another controller.",
-            "type Other is imported from '../repositories/thingRepository'; a controller's wire shapes may only take types from '../types/models.gen' or from another controller.",
+            "type Thing is imported from '../services/thingService'; a controller's wire shapes may only take types from '../types/models.gen', '@amerilux/netsuite-api/server' or from another controller.",
+            "type Other is imported from '../repositories/thingRepository'; a controller's wire shapes may only take types from '../types/models.gen', '@amerilux/netsuite-api/server' or from another controller.",
             "'import type * as Models' from '../types/models.gen' cannot be carried to the client; import the types by name.",
         ]);
+    });
+
+    it('marks an endpoint whose return type is written RawResponse, carrying the type from the package client entry', () => {
+        const source = thingController(`
+import type { RawResponse } from '@amerilux/netsuite-api/server';
+export const thingEndpoints = defineEndpoints({
+    csv: (request: { month: string }): RawResponse => rawResponse({ contentType: 'text/csv', body: '' }),
+    rows: (): string[] => [],
+});`);
+        const { contract, problems } = readControllerContract('api/src/controllers/thingController.ts', source, options);
+        expect(problems).toEqual([]);
+        expect(contract?.typeImports).toEqual([{ moduleSpecifier: '@amerilux/netsuite-api/client', names: ['RawResponse'] }]);
+        expect(contract?.endpoints.map((endpoint) => [endpoint.name, endpoint.raw])).toEqual([['csv', true], ['rows', false]]);
     });
 
     it('carries a renamed type import under the client specifier', () => {

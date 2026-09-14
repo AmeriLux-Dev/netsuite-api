@@ -1,5 +1,5 @@
 import type { ApiEnvelope, Endpoints, ScriptDeclaration } from '../index.js';
-import { invokeEndpoint } from './endpoint.js';
+import { invokeEndpoint, type ControllerOptions } from './endpoint.js';
 
 /**
  * Exposes a controller's endpoints as a Restlet:
@@ -8,11 +8,13 @@ import { invokeEndpoint } from './endpoint.js';
  *
  * Every call is a POST whose JSON body names the endpoint, so `post` is the only entry point a
  * controller exports. The declaration names the script the controller is deployed as; the generator
- * reads it from this call to build the clients.
+ * reads it from this call to build the clients. The options carry the authorize hook, run before
+ * every handler. A Restlet always answers with the JSON envelope; an endpoint that returns a raw
+ * response belongs in a Suitelet.
  */
 
 export type RestletEntryPoint = (requestBody: unknown) => ApiEnvelope<unknown>;
 
-export function defineRestlet(script: ScriptDeclaration, endpoints: Endpoints): RestletEntryPoint {
-    return (requestBody) => invokeEndpoint(script.name, endpoints, requestBody);
+export function defineRestlet(script: ScriptDeclaration, endpoints: Endpoints, options: ControllerOptions = {}): RestletEntryPoint {
+    return (requestBody) => invokeEndpoint(script.name, endpoints, requestBody, { ...options, allowRawResponse: false }).envelope;
 }

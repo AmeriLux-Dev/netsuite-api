@@ -111,12 +111,12 @@ A hook calls `customerApi.search({ search: 'acme' })` and gets a `Promise<Custom
   "scriptsOutFile": "api/src/scripts.gen.ts",
   "clientModule": "@amerilux/netsuite-api/client",
   "wireModule": "@amerilux/netsuite-api",
-  "typeImports": { "../types/models.gen": "./models.gen" },
+  "typeImports": { "../types/models.gen": "./models.gen", "@amerilux/netsuite-api/server": "@amerilux/netsuite-api/client" },
   "copyFiles": { "api/src/types/models.gen.ts": "client/src/api/models.gen.ts" }
 }
 ```
 
-Paths are relative to the config file. `typeImports` maps a specifier as written in a controller to the specifier the client resolves; only listed specifiers may be imported for types. `copyFiles` copies the files those specifiers point at.
+Paths are relative to the config file. `typeImports` maps a specifier as written in a controller to the specifier the client resolves; only listed specifiers may be imported for types (the package's server entry maps to its client entry so `RawResponse` carries over). `copyFiles` copies the files those specifiers point at.
 
 ## The client at runtime
 
@@ -129,6 +129,41 @@ if (import.meta.env.DEV) configureApiClient({ basePaths: { restlet: '/api/restle
 ```
 
 A failed call rejects with an `ApiClientError` carrying the envelope's status and message.
+
+## Authorizing calls
+
+A Restlet runs as the caller's role, and NetSuite's own permissions apply to every record the handler touches. When a controller needs a rule of its own, such as an endpoint only some roles may call, the define call takes an `authorize` hook, run before every handler once the endpoint is known to exist:
+
+```ts
+import * as runtime from 'N/runtime';
+import { ApiError, defineEndpoints, defineRestlet } from '@amerilux/netsuite-api/server';
+
+const ADMINISTRATOR = 3;
+
+export const post = defineRestlet({ name: 'orders', scriptId: '...', deployId: '...' }, ordersEndpoints, {
+    authorize: ({ endpoint }) => {
+        if (endpoint === 'remove' && Number(runtime.getCurrentUser().role) !== ADMINISTRATOR) throw ApiError.forbidden('Only an administrator removes orders.');
+    },
+});
+```
+
+The hook sees the controller, the endpoint name and the request. Throwing an `ApiError` answers with its status and message; returning lets the call through. Reading the session belongs in a repository function in a project that keeps to its layers, so a real hook calls one.
+
+## Answering with a document
+
+Every endpoint answers with the JSON envelope, except a Suitelet endpoint that returns `rawResponse(...)`: a CSV export, a rendered PDF, a File Cabinet file. The handler writes `RawResponse` as its return type, exactly, and the generator lists the endpoint on the client, which resolves it to a `Blob`:
+
+```ts
+import type { RawResponse } from '@amerilux/netsuite-api/server';
+import { defineEndpoints, defineSuitelet, rawResponse } from '@amerilux/netsuite-api/server';
+
+export const documentsEndpoints = defineEndpoints({
+    csv: (request: { month: string }): RawResponse => rawResponse({ contentType: 'text/csv', body: buildCsv(request.month), fileName: `orders-${request.month}.csv` }),
+    invoicePdf: (request: { id: number }): RawResponse => rawResponse({ file: renderInvoice(request.id), inline: true }),
+});
+```
+
+In the browser, `documentsApi.csv({ month })` resolves to a `Blob`; hand it to `URL.createObjectURL` for a download link. A text answer takes a content type, a body, optional headers and, for a download, a file name; a file answer takes an `N/file` object and whether to show it inline. A failure still arrives as the envelope and is thrown as an `ApiClientError`. A Restlet cannot write a raw answer: a handler returning one there is a 500.
 
 ## Calling a Suitelet from server code
 

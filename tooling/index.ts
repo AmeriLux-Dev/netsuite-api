@@ -1,7 +1,7 @@
 /** The generator as a library: what the `netsuite-api` command runs, for a build tool or a test to call directly. */
 export { DEFAULT_CONFIG_FILE_NAME, ClientGeneratorConfigError, defaultClientGeneratorConfig, loadClientGeneratorConfig } from './config.js';
 export type { ClientGeneratorConfig, ResolvedClientGeneratorConfig } from './config.js';
-export { isControllerFileName, readControllerContract, readLeadingJsDoc, toPascalCase } from './controllerReader.js';
+export { RAW_RESPONSE_TYPE_NAME, isControllerFileName, readControllerContract, readLeadingJsDoc, toPascalCase } from './controllerReader.js';
 export type { CarriedTypeImport, ControllerContract, ControllerKind, ControllerProblem, ControllerReadResult, DeclaredScript, EndpointSignature, ReadControllerOptions, TypeDeclaration } from './controllerReader.js';
 export { readAppDeclarations } from './appReader.js';
 export type { AppDeclarations } from './appReader.js';

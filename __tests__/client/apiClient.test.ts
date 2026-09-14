@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ScriptRef } from '../../src/index.js';
-import { ApiClientError, buildApiUrl, callEndpoint, configureApiClient, createApiClient } from '../../src/client/index.js';
+import { ApiClientError, buildApiUrl, callEndpoint, callRawEndpoint, configureApiClient, createApiClient } from '../../src/client/index.js';
+import type { RawResponse } from '../../src/client/index.js';
 
 const userScript: ScriptRef = { kind: 'restlet', scriptId: 'customscript_test_user', deployId: 'customdeploy_test_user' };
 
-function mockFetchResponse(status: number, body: unknown) {
+function mockFetchResponse(status: number, body: unknown, contentType = 'application/json') {
     const text = typeof body === 'string' ? body : JSON.stringify(body);
-    const fetchMock = vi.fn(async () => new Response(text, { status, headers: { 'Content-Type': 'application/json' } }));
+    const fetchMock = vi.fn(async () => new Response(text, { status, headers: { 'Content-Type': contentType } }));
     vi.stubGlobal('fetch', fetchMock);
     return fetchMock;
 }
@@ -90,5 +91,28 @@ describe('createApiClient', () => {
         const pingApi = createApiClient<PingEndpoints>(userScript);
         await expect(pingApi.status()).resolves.toEqual({ up: true });
         expect(JSON.parse(lastRequest(fetchMock).init.body as string)).toEqual({ endpoint: 'status' });
+    });
+
+    it('resolves a raw endpoint to a Blob, the way the generator wires it', async () => {
+        type DocumentsEndpoints = { csv: (request: { month: string }) => RawResponse };
+        const fetchMock = mockFetchResponse(200, 'month,2026-09', 'text/csv');
+        const documentsApi = createApiClient<DocumentsEndpoints>({ ...userScript, kind: 'suitelet' }, { rawEndpoints: ['csv'] });
+        const blob: Blob = await documentsApi.csv({ month: '2026-09' });
+        expect(await blob.text()).toBe('month,2026-09');
+        expect(JSON.parse(lastRequest(fetchMock).init.body as string)).toEqual({ month: '2026-09', endpoint: 'csv' });
+    });
+});
+
+describe('callRawEndpoint', () => {
+    it('throws the envelope error when the raw endpoint rejects the call', async () => {
+        mockFetchResponse(200, { status: 403, error: 'Not permitted', data: null });
+        await expect(callRawEndpoint(userScript, 'csv')).rejects.toMatchObject({ name: 'ApiClientError', status: 403, message: 'Not permitted' });
+    });
+
+    it('throws when the answer is JSON where a document was expected, or a failed status without an envelope', async () => {
+        mockFetchResponse(200, { status: 200, error: null, data: { rows: [] } });
+        await expect(callRawEndpoint(userScript, 'csv')).rejects.toMatchObject({ status: 200, message: expect.stringContaining('answered JSON') });
+        mockFetchResponse(502, '<html>gateway</html>', 'text/html');
+        await expect(callRawEndpoint(userScript, 'csv')).rejects.toMatchObject({ status: 502 });
     });
 });

@@ -21,8 +21,13 @@ export interface EndpointSignature {
     requestType?: string;
     requestOptional: boolean;
     responseType: string;
+    /** True when the return type is written `RawResponse`: the endpoint answers with a document, and the client resolves it to a Blob. */
+    raw: boolean;
     jsDoc?: string;
 }
+
+/** The return type a handler writes, exactly, to answer with a document instead of the envelope. */
+export const RAW_RESPONSE_TYPE_NAME = 'RawResponse';
 
 export interface CarriedTypeImport {
     /** The specifier as the client resolves it, after the typeImports mapping. */
@@ -169,12 +174,14 @@ function readEndpoint(property: ts.ObjectLiteralElementLike, filePath: string, s
         problems.push({ filePath, message: `endpoint '${propertyName}' has no parameter type annotation; the request shape is read from it.` });
         return { problems };
     }
+    const responseType = handler.type.getText(sourceFile);
     return {
         endpoint: {
             name: propertyName,
             requestType: parameter?.type?.getText(sourceFile),
             requestOptional: parameter?.questionToken !== undefined || parameter?.initializer !== undefined,
-            responseType: handler.type.getText(sourceFile),
+            responseType,
+            raw: responseType === RAW_RESPONSE_TYPE_NAME,
             jsDoc: readLeadingJsDoc(property, sourceFile),
         },
         problems,

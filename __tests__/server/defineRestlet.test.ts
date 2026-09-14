@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as log from 'N/log';
-import { ApiError, defineEndpoints, defineRestlet, parseEndpointRequest, readEndpointCall } from '../../src/server/index.js';
+import { ApiError, defineEndpoints, defineRestlet, parseEndpointRequest, rawResponse, readEndpointCall } from '../../src/server/index.js';
+import type { RawResponse } from '../../src/server/index.js';
 
 const thingsEndpoints = defineEndpoints({
     byId: (request: { id: string }): { id: number } => ({ id: Number(request.id) }),
@@ -72,5 +73,26 @@ describe('defineRestlet', () => {
         expect(post({ id: '7' })).toMatchObject({ status: 400, data: null });
         expect(post({ endpoint: 'nope' })).toMatchObject({ status: 404, data: null });
         expect(post({ endpoint: 'constructor' })).toMatchObject({ status: 404, data: null });
+    });
+
+    it('runs the authorize hook before the handler, with the endpoint and the request, and answers what it throws', () => {
+        const authorize = vi.fn(({ endpoint, request }: { endpoint: string; request: Record<string, unknown> }) => {
+            if (endpoint === 'create' && request.name === 'secret') throw ApiError.forbidden('Not for you');
+        });
+        const guarded = defineRestlet({ name: 'things', scriptId: 'customscript_test_things', deployId: 'customdeploy_test_things' }, thingsEndpoints, { authorize });
+        expect(guarded({ endpoint: 'create', name: 'secret' })).toEqual({ status: 403, error: 'Not for you', data: null });
+        expect(guarded({ endpoint: 'create', name: 'widget' })).toEqual({ status: 200, error: null, data: { created: 'widget' } });
+        expect(authorize).toHaveBeenCalledWith({ controller: 'things', endpoint: 'create', request: { name: 'secret' } });
+        // An unknown endpoint is a 404 before the hook sees it.
+        authorize.mockClear();
+        expect(guarded({ endpoint: 'nope' })).toMatchObject({ status: 404 });
+        expect(authorize).not.toHaveBeenCalled();
+    });
+
+    it('answers 500 and logs when a handler returns a raw response, which only a Suitelet can write', () => {
+        const documents = defineEndpoints({ csv: (): RawResponse => rawResponse({ contentType: 'text/csv', body: 'a,b' }) });
+        const restlet = defineRestlet({ name: 'documents', scriptId: 'customscript_test_documents', deployId: 'customdeploy_test_documents' }, documents);
+        expect(restlet({ endpoint: 'csv' })).toEqual({ status: 500, error: 'Internal Server Error', data: null });
+        expect(log.error).toHaveBeenCalledWith('endpoint failed', expect.objectContaining({ controller: 'documents', endpoint: 'csv', message: expect.stringContaining('only a Suitelet') }));
     });
 });

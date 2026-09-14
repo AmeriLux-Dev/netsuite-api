@@ -39,6 +39,16 @@ export type EndpointRequest<TEndpoint extends Endpoint> = Parameters<TEndpoint> 
 /** The response type of an endpoint: what its handler returns. */
 export type EndpointResponse<TEndpoint extends Endpoint> = ReturnType<TEndpoint>;
 
+/**
+ * What a Suitelet endpoint returns to answer with something other than the JSON envelope: a file
+ * download, a CSV, a rendered PDF. The server builds one with rawResponse(); the browser client
+ * resolves such an endpoint to a Blob. A Restlet cannot answer with one. A handler that answers this
+ * way writes `RawResponse` as its return type, exactly, so the generator can tell the client.
+ */
+export interface RawResponse {
+    readonly isRawResponse: true;
+}
+
 /** How a script is reached over HTTP; the client builds the URL from it. */
 export type ScriptKind = 'restlet' | 'suitelet';
 
