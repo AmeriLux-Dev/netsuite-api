@@ -8,7 +8,7 @@ The API layer for a NetSuite single-page app. The app's server side is SuiteScri
 - **`netsuite-api generate`**: reads the controllers and writes the client's whole view of the backend, one module per controller and an index re-exporting them, plus the server-side map of scripts. The client never imports from the server tree.
 - **`@amerilux/netsuite-api`** (the root): the wire itself. The envelope, the endpoint types, `ScriptDeclaration`, `ScriptRef`.
 
-The layout it assumes is the one `create-netsuite-project` scaffolds: `api/` (SuiteScript) and `client/` (React) as workspaces, and `netsuite.ts` at the root holding the application's names.
+The layout it assumes is the one `create-netsuite-project` scaffolds: `api/` (SuiteScript) and `client/` (React) as workspaces.
 
 ## A controller
 
@@ -102,15 +102,9 @@ export * as user from './user.gen';
 
 A hook imports `{ customer }` from it, calls `customer.api.search({ search: 'acme' })` and gets a `Promise<customer.CustomerSummary[]>`. The second argument carries an `AbortSignal`.
 
-**`client/src/app.gen.ts`**, a verbatim copy of the app file, outside the api folder so a page or a component may import `app` without touching a client.
-
 **`api/src/scripts.gen.ts`**, the server-side map of every declared script by controller name. A repository passes an entry to `createSuiteletClient`; nothing else needs it.
 
 `netsuite-api check` exits non-zero when any generated file is missing, out of date or left over, for CI. `netsuite-api generate --dry-run` prints every file instead of writing anything.
-
-### The app file
-
-`netsuite.ts` at the project root holds the application's names and any id no controller or model owns. Both sides use it, so the client gets a verbatim copy: the file is exported constants and types only, with no imports and nothing that runs.
 
 ### Configuration
 
@@ -119,9 +113,7 @@ A hook imports `{ customer }` from it, calls `customer.api.search({ search: 'acm
 ```json
 {
   "controllers": "api/src/controllers",
-  "appFile": "netsuite.ts",
   "outDir": "client/src/api",
-  "appOutFile": "client/src/app.gen.ts",
   "scriptsOutFile": "api/src/scripts.gen.ts",
   "clientModule": "@amerilux/netsuite-api/client",
   "wireModule": "@amerilux/netsuite-api",

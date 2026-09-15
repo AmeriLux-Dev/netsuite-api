@@ -1,9 +1,8 @@
 import * as nodePath from 'node:path';
-import { readAppDeclarations } from './appReader.js';
 import type { ResolvedClientGeneratorConfig } from './config.js';
 import { isControllerFileName, readControllerContract } from './controllerReader.js';
 import type { ControllerProblem } from './controllerReader.js';
-import { CLIENT_INDEX_FILE_NAME, controllerModuleFileName, emitAppModule, emitClientIndexModule, emitControllerModule, emitScriptsModule, sortControllers } from './emit.js';
+import { CLIENT_INDEX_FILE_NAME, controllerModuleFileName, emitClientIndexModule, emitControllerModule, emitScriptsModule, sortControllers } from './emit.js';
 import type { EmittedController, InlinedTypeSection } from './emit.js';
 import { toPosixPath } from './file-system.js';
 import type { FileSystemAdapter } from './file-system.js';
@@ -30,7 +29,7 @@ export interface PlannedFile {
 }
 
 export interface ClientGenerationPlan {
-    /** The modules to write: one per controller, the client index, the app module, the scripts map; empty when there are problems. */
+    /** The modules to write: one per controller, the client index, the scripts map; empty when there are problems. */
     files: PlannedFile[];
     /** Generated files in the client's output directory the plan does not write: a removed controller's module, or the copy of the entity types an earlier version made. Absolute paths. */
     leftoverFiles: string[];
@@ -81,7 +80,6 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
     const resolve = (relativePath: string) => nodePath.resolve(config.rootDirectory, relativePath);
     const label = (absolutePath: string) => relativeLabel(config.rootDirectory, absolutePath);
     const controllersDirectory = resolve(config.controllers);
-    const appFile = resolve(config.appFile);
     const outDirectory = resolve(config.outDir);
     const problems: ControllerProblem[] = [];
 
@@ -130,15 +128,6 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
     }
     problems.push(...findDuplicateScriptIds(emitted));
 
-    let appDeclarations: string[] = [];
-    if (fileSystem.fileExists(appFile)) {
-        const app = readAppDeclarations(label(appFile), fileSystem.readTextFile(appFile));
-        problems.push(...app.problems);
-        appDeclarations = app.declarations;
-    } else {
-        problems.push({ filePath: label(appFile), message: 'the app file does not exist.' });
-    }
-
     const controllers: PlannedController[] = emitted.map(({ contract }) => ({
         name: contract.name,
         filePath: contract.filePath,
@@ -155,7 +144,6 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
             content: emitControllerModule(controller, { clientModule: config.clientModule }),
         })),
         { path: nodePath.join(outDirectory, CLIENT_INDEX_FILE_NAME), content: emitClientIndexModule(emitted, { controllersLabel }) },
-        { path: resolve(config.appOutFile), content: emitAppModule(appDeclarations, { appLabel: label(appFile) }) },
         { path: resolve(config.scriptsOutFile), content: emitScriptsModule(emitted, { wireModule: config.wireModule, controllersLabel }) },
     ];
     const leftoverFiles = findLeftoverFiles(fileSystem, outDirectory, files.map((file) => file.path));

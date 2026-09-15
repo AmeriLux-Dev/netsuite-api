@@ -5,8 +5,6 @@ import { createInMemoryFileSystemAdapter } from '../../tooling/file-system.js';
 import { checkClientGeneration, planClientGeneration, runClientGeneration } from '../../tooling/generate.js';
 import { runCli } from '../../tooling/cli/main.js';
 import {
-    appSource,
-    expectedAppModule,
     expectedIndexModule,
     expectedScriptsModule,
     expectedUserModule,
@@ -21,15 +19,13 @@ const clientDirectory = nodePath.join(projectRoot, 'client', 'src', 'api');
 const userModuleFile = nodePath.join(clientDirectory, 'user.gen.ts');
 const userRolesModuleFile = nodePath.join(clientDirectory, 'userRoles.gen.ts');
 const indexModuleFile = nodePath.join(clientDirectory, 'index.gen.ts');
-const appModuleFile = nodePath.join(projectRoot, 'client', 'src', 'app.gen.ts');
 const scriptsModuleFile = nodePath.join(projectRoot, 'api', 'src', 'scripts.gen.ts');
 const modelsFile = nodePath.join(projectRoot, 'api', 'src', 'types', 'models.gen.ts');
 const controllersDirectory = nodePath.join(projectRoot, 'api', 'src', 'controllers');
-const allGeneratedFiles = [userModuleFile, userRolesModuleFile, indexModuleFile, appModuleFile, scriptsModuleFile];
+const allGeneratedFiles = [userModuleFile, userRolesModuleFile, indexModuleFile, scriptsModuleFile];
 
 function projectFiles(overrides: Record<string, string | undefined> = {}) {
     const files: Record<string, string | undefined> = {
-        [nodePath.join(projectRoot, 'netsuite.ts')]: appSource,
         [modelsFile]: modelsSource,
         [nodePath.join(controllersDirectory, 'userController.ts')]: userControllerSource,
         [nodePath.join(controllersDirectory, 'userRolesController.ts')]: userRolesControllerSource,
@@ -55,7 +51,7 @@ export const post = defineRestlet({ name: '${name}', scriptId: 'customscript_dem
 }
 
 describe('planClientGeneration', () => {
-    it('plans a module per controller, the client index, the app module and the scripts module', () => {
+    it('plans a module per controller, the client index and the scripts module', () => {
         const plan = planClientGeneration(optionsFor(projectFiles()));
         expect(plan.problems).toEqual([]);
         expect(plan.controllers).toEqual([
@@ -66,8 +62,7 @@ describe('planClientGeneration', () => {
         expect(plan.files[0].content).toBe(expectedUserModule);
         expect(plan.files[1].content).toBe(expectedUserRolesModule);
         expect(plan.files[2].content).toBe(expectedIndexModule);
-        expect(plan.files[3].content).toBe(expectedAppModule);
-        expect(plan.files[4].content).toBe(expectedScriptsModule);
+        expect(plan.files[3].content).toBe(expectedScriptsModule);
         expect(plan.leftoverFiles).toEqual([]);
     });
 
@@ -81,7 +76,7 @@ describe('planClientGeneration', () => {
         expect(plan.files[0].content).toContain('// Called by server code only: its types, and no client.');
         expect(plan.files[0].content).toContain('export type Endpoints = {');
         expect(plan.files[2].content).toContain('/** The user controller: its request and response types only; server code calls it, the browser does not. */');
-        expect(plan.files[4].content).toContain("user: { kind: 'restlet', scriptId: 'customscript_demo_user', deployId: 'customdeploy_demo_user', browser: false },");
+        expect(plan.files[3].content).toContain("user: { kind: 'restlet', scriptId: 'customscript_demo_user', deployId: 'customdeploy_demo_user', browser: false },");
     });
 
     it('lists the raw endpoints on the client and imports RawResponse from the client entry', () => {
@@ -155,15 +150,13 @@ export const employeeEndpoints = defineEndpoints({ create: (request: EmployeeCre
         expect(plan.files).toEqual([]);
     });
 
-    it('reports a missing app file, an empty controllers folder, and a missing models file when a controller names it', () => {
+    it('reports an empty controllers folder, and a missing models file when a controller names it', () => {
         expect(planClientGeneration(optionsFor(projectFiles({
-            [nodePath.join(projectRoot, 'netsuite.ts')]: undefined,
             [modelsFile]: undefined,
             [nodePath.join(controllersDirectory, 'userController.ts')]: undefined,
             [nodePath.join(controllersDirectory, 'userRolesController.ts')]: undefined,
         }))).problems).toEqual([
             { filePath: 'api/src/controllers', message: 'holds no <name>Controller.ts file.' },
-            { filePath: 'netsuite.ts', message: 'the app file does not exist.' },
         ]);
         expect(planClientGeneration(optionsFor(projectFiles({ [modelsFile]: undefined }))).problems).toEqual([
             { filePath: 'api/src/types/models.gen.ts', message: 'the file to copy types from does not exist; run the model generator first.' },
@@ -206,11 +199,10 @@ describe('runClientGeneration and checkClientGeneration', () => {
         expect(fileSystem.readTextFile(userModuleFile)).toBe(expectedUserModule);
         expect(fileSystem.readTextFile(userRolesModuleFile)).toBe(expectedUserRolesModule);
         expect(fileSystem.readTextFile(indexModuleFile)).toBe(expectedIndexModule);
-        expect(fileSystem.readTextFile(appModuleFile)).toBe(expectedAppModule);
         expect(fileSystem.readTextFile(scriptsModuleFile)).toBe(expectedScriptsModule);
         const second = runClientGeneration(options);
         expect(second.writtenFiles).toEqual([]);
-        expect(second.unchangedFiles).toHaveLength(5);
+        expect(second.unchangedFiles).toHaveLength(4);
         expect(checkClientGeneration(options)).toMatchObject({ missingFiles: [], staleFiles: [], leftoverFiles: [] });
         fileSystem.writeTextFile(scriptsModuleFile, '// edited by hand');
         expect(checkClientGeneration(options).staleFiles).toEqual([scriptsModuleFile]);
@@ -275,19 +267,18 @@ describe('runCli', () => {
         const first = environment(fileSystem);
         expect(runCli(['generate'], first.environment)).toBe(0);
         expect(first.stdout.join('\n')).toBe([
-            'netsuite-api: 2 controller(s), 5 file(s) written, 0 unchanged, 1 deleted.',
+            'netsuite-api: 2 controller(s), 4 file(s) written, 0 unchanged, 1 deleted.',
             ' - user (restlet): 1 endpoint(s)',
             ' - userRoles (suitelet): 1 endpoint(s), types only',
             ' - wrote client/src/api/user.gen.ts',
             ' - wrote client/src/api/userRoles.gen.ts',
             ' - wrote client/src/api/index.gen.ts',
-            ' - wrote client/src/app.gen.ts',
             ' - wrote api/src/scripts.gen.ts',
             ' - deleted client/src/api/models.gen.ts',
         ].join('\n'));
         const second = environment(fileSystem);
         expect(runCli(['check'], second.environment)).toBe(0);
-        expect(second.stdout[0]).toMatch(/^Generated files are up to date \(5 file\(s\)\)\./);
+        expect(second.stdout[0]).toMatch(/^Generated files are up to date \(4 file\(s\)\)\./);
     });
 
     it('prints every file with --dry-run and writes nothing', () => {
@@ -311,7 +302,6 @@ describe('runCli', () => {
             ' - missing: client/src/api/user.gen.ts',
             ' - missing: client/src/api/userRoles.gen.ts',
             ' - missing: client/src/api/index.gen.ts',
-            ' - missing: client/src/app.gen.ts',
             ' - missing: api/src/scripts.gen.ts',
             ' - left over: client/src/api/orders.gen.ts',
         ].join('\n'));

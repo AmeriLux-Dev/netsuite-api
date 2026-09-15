@@ -8,12 +8,8 @@ import type { FileSystemAdapter } from './file-system.js';
 export interface ClientGeneratorConfig {
     /** Directory holding the controllers: one `<name>Controller.ts` per script. */
     controllers: string;
-    /** The file declaring `app` (and any other id no controller or model owns), copied into the client verbatim. */
-    appFile: string;
     /** The client's generated directory: one `<name>.gen.ts` per controller (its wire shapes, its endpoint type, its client) and `index.gen.ts` re-exporting each under the controller's name. Nothing else lives there. */
     outDir: string;
-    /** The generated copy of the app file for the client, outside the api folder so pages and components may import it. */
-    appOutFile: string;
     /** The generated server-side `scripts` map: what a repository passes to createSuiteletClient. */
     scriptsOutFile: string;
     /** The specifier the controller modules import `createApiClient` from. */
@@ -45,9 +41,7 @@ export const DEFAULT_CONFIG_FILE_NAME = 'netsuite-api.config.json';
 
 export const defaultClientGeneratorConfig: ClientGeneratorConfig = {
     controllers: 'api/src/controllers',
-    appFile: 'netsuite.ts',
     outDir: 'client/src/api',
-    appOutFile: 'client/src/app.gen.ts',
     scriptsOutFile: 'api/src/scripts.gen.ts',
     clientModule: '@amerilux/netsuite-api/client',
     wireModule: '@amerilux/netsuite-api',
@@ -62,7 +56,7 @@ export class ClientGeneratorConfigError extends Error {
     }
 }
 
-const stringSettings = ['controllers', 'appFile', 'outDir', 'appOutFile', 'scriptsOutFile', 'clientModule', 'wireModule'] as const;
+const stringSettings = ['controllers', 'outDir', 'scriptsOutFile', 'clientModule', 'wireModule'] as const;
 const mapSettings = ['typeImports', 'inlineTypes'] as const;
 
 function isStringMap(value: unknown): value is Record<string, string> {
