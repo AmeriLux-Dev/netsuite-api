@@ -159,6 +159,49 @@ export type Total = Money;
         expect(plan.files).toEqual([]);
     });
 
+    it('writes a Date in a response shape as string in the client module, and rejects a Date reached from a request shape', () => {
+        const shiftsService = `
+export interface ShiftWindow {
+    from: Date;
+    to: Date | null;
+}
+`;
+        const shiftsController = restletController('shifts', `
+import type { ShiftWindow } from '../services/shiftsService';
+export interface Shift { id: number; startsAt: Date; window: ShiftWindow }
+export const shiftsEndpoints = defineEndpoints({
+    list: (): Shift[] => [],
+    latest: (): Date | undefined => undefined,
+});`);
+        const plan = planClientGeneration(optionsFor(projectFiles({
+            [nodePath.join(servicesDirectory, 'shiftsService.ts')]: shiftsService,
+            [nodePath.join(controllersDirectory, 'shiftsController.ts')]: shiftsController,
+        })));
+        expect(plan.problems).toEqual([]);
+        const shiftsModule = plan.files[0].content;
+        expect(shiftsModule).toContain('export interface ShiftWindow {\n    from: string;\n    to: string | null;\n}');
+        expect(shiftsModule).toContain('export interface Shift { id: number; startsAt: string; window: ShiftWindow }');
+        expect(shiftsModule).toContain('    latest: () => string | undefined;');
+        expect(shiftsModule).not.toContain('Date');
+
+        const requestsController = restletController('shifts', `
+import type { ShiftWindow } from '../services/shiftsService';
+export interface WindowRequest { window: ShiftWindow }
+export const shiftsEndpoints = defineEndpoints({
+    within: (request: WindowRequest): number => 0,
+    since: (request: { from: Date }): number => 0,
+    byId: (request: { id: number }): number => 0,
+});`);
+        const rejected = planClientGeneration(optionsFor(projectFiles({
+            [nodePath.join(servicesDirectory, 'shiftsService.ts')]: shiftsService,
+            [nodePath.join(controllersDirectory, 'shiftsController.ts')]: requestsController,
+        })));
+        expect(rejected.problems).toEqual([
+            { filePath: 'api/src/controllers/shiftsController.ts', message: "endpoint 'within' takes a Date in its request (through ShiftWindow); JSON carries dates as ISO 8601 strings, so take a string and parse it in the handler." },
+            { filePath: 'api/src/controllers/shiftsController.ts', message: "endpoint 'since' takes a Date in its request (through { from: Date }); JSON carries dates as ISO 8601 strings, so take a string and parse it in the handler." },
+        ]);
+    });
+
     it('reports an entity type built on the repository package, one the models file lacks, and a sibling controller that does not exist', () => {
         const employeeController = restletController('employee', `
 import type { EmployeeCreate, Missing } from '../types/models.gen';

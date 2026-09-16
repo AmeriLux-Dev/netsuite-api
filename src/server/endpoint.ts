@@ -120,7 +120,7 @@ export function invokeEndpoint(controllerName: string, endpoints: Endpoints, raw
         if (error instanceof ApiError) {
             status = error.status;
             log.debug('endpoint rejected', { controller: controllerName, endpoint: endpointName, status, message: error.message, details: error.details });
-            return { envelope: { status, error: error.message, data: null } };
+            return { envelope: error.details === undefined ? { status, error: error.message, data: null } : { status, error: error.message, data: null, details: error.details } };
         }
         status = 500;
         log.error('endpoint failed', { controller: controllerName, endpoint: endpointName, ...describeError(error) });

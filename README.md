@@ -45,7 +45,7 @@ export const post = defineRestlet({
 }, customerEndpoints);
 ```
 
-Every call is a POST whose JSON body carries the request plus an `endpoint` property naming the endpoint. The handler answers with data, or throws an `ApiError` for a status the caller should see; anything else is a 500 with the details logged. A Suitelet controller is the same file with `defineSuitelet` and `onRequest` instead, and `browser: false` in the declaration when only server code calls it.
+Every call is a POST whose JSON body carries the request plus an `endpoint` property naming the endpoint. The handler answers with data, or throws an `ApiError` for a status the caller should see, with a `details` object the caller can act on (a per-field validation map, the offending id) that travels in the envelope; anything else is a 500 whose cause is logged and never sent. A Suitelet controller is the same file with `defineSuitelet` and `onRequest` instead, and `browser: false` in the declaration when only server code calls it.
 
 The declaration is the controller's own statement of the script it is deployed as. It creates nothing: the controller builds, tests and bundles before any script record exists. The ids are how a client reaches the controller once it is deployed, so set them to whatever the record and deployment are called in NetSuite and in the SDF object; the generator wires every client to them.
 
@@ -93,6 +93,8 @@ export const api = createApiClient<Endpoints>({ kind: 'restlet', scriptId: 'cust
 
 A type imported from a service is copied the same way, with the entity types it is built on following it in from the models file. A type imported from another controller becomes an import of that controller's module. A type built on something no inlined file declares (`CustomerCreate`, `CustomerPatch`: the repository package's input types; a type a service imports from a package) is an error, because the client could not carry it; write the wire shape out in the controller instead. So is a type reached through a renamed import (`import type { Employee as EmployeeRecord }`) in a service: import it under its own name. A generated module no controller owns any more is deleted on the next run.
 
+JSON carries no dates. A `Date` in a response shape (an entity's `tranDate`) arrives in the browser as an ISO 8601 string, so the generated module writes `string` wherever the shape says `Date`; the page formats it. A `Date` in a request shape is an error, because the handler would receive a string where its annotation promises a Date: take a string and parse it in the handler.
+
 **`client/src/api/index.gen.ts`**, the client's view of the backend: every controller's module re-exported under the controller's name.
 
 ```ts
@@ -134,7 +136,7 @@ import { configureApiClient } from '@amerilux/netsuite-api/client';
 if (import.meta.env.DEV) configureApiClient({ basePaths: { restlet: '/api/restlet', suitelet: '/api/suitelet' } });
 ```
 
-A failed call rejects with an `ApiClientError` carrying the envelope's status and message; a call that got no answer at all carries `NO_RESPONSE_STATUS` (0). Before it rejects, the failure goes to the handler `configureApiClient` was given, with the script, the endpoint and the request, so the app reports every failure in one place and a hook carries no error handling of its own:
+A failed call rejects with an `ApiClientError` carrying the envelope's status, message and `details` (whatever the handler gave its `ApiError`, for a form to show per field); a call that got no answer at all carries `NO_RESPONSE_STATUS` (0). Before it rejects, the failure goes to the handler `configureApiClient` was given, with the script, the endpoint and the request, so the app reports every failure in one place and a hook carries no error handling of its own:
 
 ```ts
 configureApiClient({ onError: (error, { endpoint }) => showBanner(`${endpoint}: ${error.message}`) });

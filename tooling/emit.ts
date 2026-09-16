@@ -1,5 +1,6 @@
 import { GENERATED_CLIENT_NAME, GENERATED_ENDPOINTS_TYPE_NAME } from './controllerReader.js';
 import type { ControllerContract, DeclaredScript, EndpointSignature, TypeDeclaration, TypeImportName } from './controllerReader.js';
+import { writeDatesAsStrings } from './wireTypes.js';
 
 /**
  * Writes the generated modules. Each controller gets its own client module, `<name>.gen.ts`: the
@@ -56,9 +57,10 @@ function indentJsDoc(jsDoc: string): string {
         .join('\n');
 }
 
+// A Date on the wire is an ISO string: the client module says so wherever a shape says Date.
 function emitEndpointMember(endpoint: EndpointSignature): string {
-    const parameter = endpoint.requestType === undefined ? '' : `request${endpoint.requestOptional ? '?' : ''}: ${endpoint.requestType}`;
-    const member = `${INDENT}${endpoint.name}: (${parameter}) => ${endpoint.responseType};`;
+    const parameter = endpoint.requestType === undefined ? '' : `request${endpoint.requestOptional ? '?' : ''}: ${writeDatesAsStrings(endpoint.requestType, 'type')}`;
+    const member = `${INDENT}${endpoint.name}: (${parameter}) => ${writeDatesAsStrings(endpoint.responseType, 'type')};`;
     return endpoint.jsDoc ? `${indentJsDoc(endpoint.jsDoc)}\n${member}` : member;
 }
 
@@ -102,9 +104,9 @@ export function emitControllerModule({ contract, sourceLabel, inlinedTypes }: Em
     const sections: string[] = [header.join('\n'), imports.join('\n')];
     for (const section of inlinedTypes) {
         sections.push(`// Types from ${section.sourceLabel}, copied so this module stands on its own.`);
-        for (const declaration of section.declarations) sections.push(declaration.text);
+        for (const declaration of section.declarations) sections.push(writeDatesAsStrings(declaration.text, 'declaration'));
     }
-    for (const declaration of contract.typeDeclarations) sections.push(declaration.text);
+    for (const declaration of contract.typeDeclarations) sections.push(writeDatesAsStrings(declaration.text, 'declaration'));
     const members = contract.endpoints.map(emitEndpointMember);
     // A type alias, not an interface: only an object type literal satisfies the Endpoints index signature.
     sections.push(`/** The endpoint signatures of the ${contract.name} controller, as its handlers declare them. */\nexport type ${GENERATED_ENDPOINTS_TYPE_NAME} = {\n${members.join('\n')}\n};`);

@@ -129,7 +129,7 @@ export function callEndpoint<TData>(scriptRef: ScriptRef, endpointName: string, 
             throw new ApiClientError(response.status, `Unexpected response from ${scriptRef.scriptId} (${response.status})`, text.slice(0, 500));
         }
         if (envelope.error !== null || envelope.status >= 400) {
-            throw new ApiClientError(envelope.status, envelope.error ?? `Request failed (${envelope.status})`);
+            throw new ApiClientError(envelope.status, envelope.error ?? `Request failed (${envelope.status})`, envelope.details);
         }
         return envelope.data as TData;
     });
@@ -147,7 +147,7 @@ export function callRawEndpoint(scriptRef: ScriptRef, endpointName: string, requ
         if (!response.ok || contentType.includes('application/json')) {
             const text = await response.text();
             const envelope = parseEnvelope<unknown>(text);
-            if (envelope && (envelope.error !== null || envelope.status >= 400)) throw new ApiClientError(envelope.status, envelope.error ?? `Request failed (${envelope.status})`);
+            if (envelope && (envelope.error !== null || envelope.status >= 400)) throw new ApiClientError(envelope.status, envelope.error ?? `Request failed (${envelope.status})`, envelope.details);
             if (!response.ok) throw new ApiClientError(response.status, `Unexpected response from ${scriptRef.scriptId} (${response.status})`, text.slice(0, 500));
             throw new ApiClientError(response.status, `${scriptRef.scriptId}.${endpointName} answered JSON where a document was expected.`, text.slice(0, 500));
         }

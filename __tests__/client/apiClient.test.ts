@@ -64,6 +64,11 @@ describe('callEndpoint', () => {
         await expect(callEndpoint(userScript, 'byId', { id: 9 })).rejects.toMatchObject({ name: 'ApiClientError', status: 404, message: 'Customer not found' });
     });
 
+    it('carries the envelope details on the error, for the caller to act on', async () => {
+        mockFetchResponse(200, { status: 400, error: 'Check the form.', data: null, details: { email: 'not an address' } });
+        await expect(callEndpoint(userScript, 'create', { email: 'x' })).rejects.toMatchObject({ status: 400, details: { email: 'not an address' } });
+    });
+
     it('throws ApiClientError when the response is not an envelope', async () => {
         mockFetchResponse(500, '<html>login</html>');
         const failure = await callEndpoint(userScript, 'list').catch((error: unknown) => error);

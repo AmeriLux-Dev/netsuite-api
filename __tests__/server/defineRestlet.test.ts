@@ -12,6 +12,10 @@ const thingsEndpoints = defineEndpoints({
     explode: (): never => {
         throw new Error('boom');
     },
+    validate: (request: { name: string }): { ok: true } => {
+        if (!request.name) throw ApiError.badRequest('name is required', { name: 'required' });
+        return { ok: true };
+    },
 });
 
 describe('parseEndpointRequest', () => {
@@ -64,7 +68,12 @@ describe('defineRestlet', () => {
         expect(log.error).not.toHaveBeenCalled();
     });
 
-    it('hides unexpected errors behind a 500 and logs them', () => {
+    it('sends the details an ApiError carries, so the caller can act on them', () => {
+        expect(post({ endpoint: 'validate', name: '' })).toEqual({ status: 400, error: 'name is required', data: null, details: { name: 'required' } });
+        expect(post({ endpoint: 'validate', name: 'widget' })).toEqual({ status: 200, error: null, data: { ok: true } });
+    });
+
+    it('hides unexpected errors behind a 500 and logs them, sending no details', () => {
         expect(post({ endpoint: 'explode' })).toEqual({ status: 500, error: 'Internal Server Error', data: null });
         expect(log.error).toHaveBeenCalledWith('endpoint failed', expect.objectContaining({ controller: 'things', endpoint: 'explode', message: 'boom' }));
     });

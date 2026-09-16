@@ -2,13 +2,14 @@ import * as nodePath from 'node:path';
 import { resolveInlineTypesFile } from './config.js';
 import type { ResolvedClientGeneratorConfig } from './config.js';
 import { isControllerFileName, readControllerContract } from './controllerReader.js';
-import type { ControllerProblem } from './controllerReader.js';
+import type { ControllerContract, ControllerProblem } from './controllerReader.js';
 import { CLIENT_INDEX_FILE_NAME, controllerModuleFileName, emitClientIndexModule, emitControllerModule, emitScriptsModule, sortControllers } from './emit.js';
 import type { EmittedController, InlinedTypeSection } from './emit.js';
 import { toPosixPath } from './file-system.js';
 import type { FileSystemAdapter } from './file-system.js';
 import { readInlinableTypesFile, selectInlinedTypes } from './typesFileReader.js';
 import type { InlinableTypesFile } from './typesFileReader.js';
+import { readReferencedNames } from './wireTypes.js';
 
 export interface GenerateClientOptions {
     config: ResolvedClientGeneratorConfig;
@@ -64,6 +65,37 @@ function findDuplicateScriptIds(controllers: EmittedController[]): ControllerPro
             const owner = owners.get(id);
             if (owner !== undefined) problems.push({ filePath: contract.filePath, message: `${property} '${id}' is also declared by ${owner}; every controller is its own script.` });
             else owners.set(id, contract.filePath);
+        }
+    }
+    return problems;
+}
+
+/**
+ * A Date reached from a request shape, through the controller's own declarations and the copied
+ * ones: the handler would receive an ISO string where its annotation promises a Date. (A shape taken
+ * from a sibling controller is checked where it is declared, as that controller's own request.)
+ */
+function findDatesInRequestShapes(contract: ControllerContract, inlinedTypes: InlinedTypeSection[], controllerLabel: string): ControllerProblem[] {
+    const declarations = new Map<string, string>();
+    for (const declaration of contract.typeDeclarations) declarations.set(declaration.name, declaration.text);
+    for (const section of inlinedTypes) {
+        for (const declaration of section.declarations) if (!declarations.has(declaration.name)) declarations.set(declaration.name, declaration.text);
+    }
+    const problems: ControllerProblem[] = [];
+    for (const endpoint of contract.endpoints) {
+        if (endpoint.requestType === undefined) continue;
+        const visited = new Set<string>();
+        const pending: { name: string; via: string }[] = readReferencedNames(endpoint.requestType, 'type').map((name) => ({ name, via: endpoint.requestType as string }));
+        while (pending.length > 0) {
+            const { name, via } = pending.shift() as { name: string; via: string };
+            if (name === 'Date') {
+                problems.push({ filePath: controllerLabel, message: `endpoint '${endpoint.name}' takes a Date in its request (through ${via}); JSON carries dates as ISO 8601 strings, so take a string and parse it in the handler.` });
+                break;
+            }
+            const text = declarations.get(name);
+            if (text === undefined || visited.has(name)) continue;
+            visited.add(name);
+            pending.push(...readReferencedNames(text, 'declaration').map((reference) => ({ name: reference, via: name })));
         }
     }
     return problems;
@@ -135,6 +167,7 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
                 else inlinedTypes.push({ sourceLabel: selectedSection.filePath, declarations: selectedSection.declarations });
             }
         }
+        problems.push(...findDatesInRequestShapes(contract, inlinedTypes, controllerLabel));
         emitted.push({ contract, sourceLabel: controllerLabel, inlinedTypes });
     }
     problems.push(...findDuplicateScriptIds(emitted));

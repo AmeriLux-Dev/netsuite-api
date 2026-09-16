@@ -1,6 +1,7 @@
 import ts from 'typescript';
 import { readLeadingJsDoc } from './controllerReader.js';
 import type { ControllerProblem, TypeDeclaration, TypeImportName } from './controllerReader.js';
+import { collectTypeReferences } from './wireTypes.js';
 
 /**
  * Reads a file whose type declarations the generator copies into a controller's generated module:
@@ -48,18 +49,6 @@ export interface SelectedInlinedTypes {
  */
 export type ResolveInlinableImport = (specifier: string) => InlinableTypesFile | 'missing' | undefined;
 
-function leftmostIdentifier(name: ts.EntityName): string {
-    return ts.isIdentifier(name) ? name.text : leftmostIdentifier(name.left);
-}
-
-function collectTypeReferences(node: ts.Node, references: string[]): void {
-    let referenced: string | undefined;
-    if (ts.isTypeReferenceNode(node)) referenced = leftmostIdentifier(node.typeName);
-    else if (ts.isTypeQueryNode(node)) referenced = leftmostIdentifier(node.exprName);
-    else if (ts.isExpressionWithTypeArguments(node) && ts.isIdentifier(node.expression)) referenced = node.expression.text;
-    if (referenced !== undefined && !references.includes(referenced)) references.push(referenced);
-    ts.forEachChild(node, (child) => collectTypeReferences(child, references));
-}
 
 function readImportedNames(statement: ts.ImportDeclaration, importedNames: Map<string, string>, renamedImports: Map<string, string>): void {
     const clause = statement.importClause;

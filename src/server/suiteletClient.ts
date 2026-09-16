@@ -47,7 +47,8 @@ export function callSuiteletEndpoint<TData>(scriptRef: ScriptRef, endpointName: 
     }
     const envelope = parseEnvelope<TData>(scriptRef, endpointName, response.body);
     if (envelope.error !== null || envelope.status >= 400) {
-        throw new ApiError(envelope.status, envelope.error ?? `Request failed (${envelope.status})`, { script: scriptRef.scriptId, endpoint: endpointName });
+        // The called script's details travel on, so the caller (and through it the browser) can act on them.
+        throw new ApiError(envelope.status, envelope.error ?? `Request failed (${envelope.status})`, envelope.details !== undefined ? envelope.details : { script: scriptRef.scriptId, endpoint: endpointName });
     }
     return envelope.data as TData;
 }

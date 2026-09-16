@@ -7,8 +7,8 @@ import { ApiError, callSuiteletEndpoint, createSuiteletClient } from '../../src/
 const requestSuitelet = vi.mocked(https.requestSuitelet);
 const helper: ScriptRef = { kind: 'suitelet', scriptId: 'customscript_test_helper', deployId: 'customdeploy_test_helper' };
 
-function answering(status: number, error: string | null, data: unknown, code = 200) {
-    requestSuitelet.mockReturnValue({ code, body: JSON.stringify({ status, error, data }), headers: {} } as never);
+function answering(status: number, error: string | null, data: unknown, code = 200, details?: unknown) {
+    requestSuitelet.mockReturnValue({ code, body: JSON.stringify({ status, error, data, details }), headers: {} } as never);
 }
 
 beforeEach(() => {
@@ -44,7 +44,12 @@ describe('callSuiteletEndpoint', () => {
             caught = error;
         }
         expect(caught).toBeInstanceOf(ApiError);
-        expect(caught).toEqual(expect.objectContaining({ status: 400, message: 'employeeId must be a positive whole number.' }));
+        expect(caught).toEqual(expect.objectContaining({ status: 400, message: 'employeeId must be a positive whole number.', details: { script: 'customscript_test_helper', endpoint: 'byEmployee' } }));
+    });
+
+    it('passes the details of an error envelope on, so they reach the caller unchanged', () => {
+        answering(400, 'Check the form.', null, 200, { employeeId: 'x' });
+        expect(() => callSuiteletEndpoint(helper, 'byEmployee', { employeeId: 'x' })).toThrow(expect.objectContaining({ status: 400, details: { employeeId: 'x' } }));
     });
 
     it('refuses a scripts entry that is not a Suitelet', () => {

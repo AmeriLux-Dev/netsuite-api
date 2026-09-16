@@ -3,11 +3,16 @@
  * reached. Both sides import this module; nothing in it touches NetSuite or the browser.
  */
 
-/** Every controller answers with this envelope; `data` is null whenever `error` is set. */
+/**
+ * Every controller answers with this envelope; `data` is null whenever `error` is set. `details` is
+ * whatever the handler gave its ApiError (a per-field validation map, the offending id), sent so the
+ * caller can act on it; a 500 carries none, its cause stays in the log.
+ */
 export interface ApiEnvelope<TData> {
     status: number;
     error: string | null;
     data: TData | null;
+    details?: unknown;
 }
 
 /** The body of a failed call, as thrown by the client's ApiClientError. */
