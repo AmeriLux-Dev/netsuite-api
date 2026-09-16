@@ -1,6 +1,6 @@
 {
   "name": "@amerilux/netsuite-api",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": false,
   "description": "The API layer for a NetSuite single-page app: endpoints served by a Restlet or a Suitelet, a typed browser client, SuiteScript module stubs for tests, and a generator that writes the client module from the controllers.",
   "license": "MIT",

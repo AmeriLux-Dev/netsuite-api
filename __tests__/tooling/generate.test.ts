@@ -12,6 +12,7 @@ import {
     modelsSource,
     userControllerSource,
     userRolesControllerSource,
+    userRolesServiceSource,
 } from './fixtures.js';
 
 const projectRoot = nodePath.resolve('/project');
@@ -22,11 +23,13 @@ const indexModuleFile = nodePath.join(clientDirectory, 'index.gen.ts');
 const scriptsModuleFile = nodePath.join(projectRoot, 'api', 'src', 'scripts.gen.ts');
 const modelsFile = nodePath.join(projectRoot, 'api', 'src', 'types', 'models.gen.ts');
 const controllersDirectory = nodePath.join(projectRoot, 'api', 'src', 'controllers');
+const servicesDirectory = nodePath.join(projectRoot, 'api', 'src', 'services');
 const allGeneratedFiles = [userModuleFile, userRolesModuleFile, indexModuleFile, scriptsModuleFile];
 
 function projectFiles(overrides: Record<string, string | undefined> = {}) {
     const files: Record<string, string | undefined> = {
         [modelsFile]: modelsSource,
+        [nodePath.join(servicesDirectory, 'userRolesService.ts')]: userRolesServiceSource,
         [nodePath.join(controllersDirectory, 'userController.ts')]: userControllerSource,
         [nodePath.join(controllersDirectory, 'userRolesController.ts')]: userRolesControllerSource,
         [nodePath.join(controllersDirectory, 'notes.md')]: 'not a controller',
@@ -110,7 +113,7 @@ export const employeeEndpoints = defineEndpoints({ me: (): EmployeeRecord => ({}
         const employeeModule = plan.files[0].content;
         expect(employeeModule).toContain(
             [
-                '// Entity types from api/src/types/models.gen.ts, copied so this module stands on its own.',
+                '// Types from api/src/types/models.gen.ts, copied so this module stands on its own.',
                 '',
                 'export interface Department {',
                 '    id: number;',
@@ -131,6 +134,29 @@ export const employeeEndpoints = defineEndpoints({ me: (): EmployeeRecord => ({}
         );
         expect(employeeModule).not.toContain('EmployeeRole');
         expect(employeeModule).not.toContain('EmployeeCreate');
+    });
+
+    it('reports a service that does not exist, and a service type built on something the client cannot carry', () => {
+        const ordersController = restletController('orders', `
+import type { OrderSummary } from '../services/orderService';
+import type { Total } from '../services/totalsService';
+export const ordersEndpoints = defineEndpoints({ list: (): OrderSummary[] => [], total: (): Total => 0 as Total });`);
+        const totalsService = `
+import type { Money } from '@amerilux/money';
+export type Total = Money;
+`;
+        const plan = planClientGeneration(optionsFor(projectFiles({
+            [nodePath.join(controllersDirectory, 'ordersController.ts')]: ordersController,
+            [nodePath.join(servicesDirectory, 'totalsService.ts')]: totalsService,
+        })));
+        expect(plan.problems).toEqual([
+            { filePath: 'api/src/services/orderService.ts', message: "the file to copy types from does not exist; '../services/orderService' names it." },
+            {
+                filePath: 'api/src/controllers/ordersController.ts',
+                message: "type 'Total' (api/src/services/totalsService.ts) is built on Money from '@amerilux/money', which the client cannot carry; write the wire shape out in the controller instead.",
+            },
+        ]);
+        expect(plan.files).toEqual([]);
     });
 
     it('reports an entity type built on the repository package, one the models file lacks, and a sibling controller that does not exist', () => {
@@ -215,7 +241,7 @@ describe('runClientGeneration and checkClientGeneration', () => {
         const oldCopy = nodePath.join(clientDirectory, 'models.gen.ts');
         fileSystem.writeTextFile(oldCopy, modelsSource);
         fileSystem.deleteFile(nodePath.join(controllersDirectory, 'userRolesController.ts'));
-        fileSystem.writeTextFile(nodePath.join(controllersDirectory, 'userController.ts'), userControllerSource.replace("import type { RoleSummary } from './userRolesController';", 'export interface RoleSummary { roleId: number }'));
+        fileSystem.writeTextFile(nodePath.join(controllersDirectory, 'userController.ts'), userControllerSource.replace("import type { RoleSummary } from '../services/userRolesService';", 'export interface RoleSummary { roleId: number }'));
         expect(checkClientGeneration(options).leftoverFiles.map((filePath) => nodePath.basename(filePath))).toEqual(['models.gen.ts', 'userRoles.gen.ts']);
         const result = runClientGeneration(options);
         expect(result.deletedFiles.map((filePath) => nodePath.basename(filePath))).toEqual(['models.gen.ts', 'userRoles.gen.ts']);
@@ -252,6 +278,16 @@ describe('loadClientGeneratorConfig', () => {
         const fileSystem = createInMemoryFileSystemAdapter({ [configPath]: JSON.stringify({ outDir: '', inlineTypes: ['x'], outFile: 'client/src/api/index.gen.ts' }) });
         expect(() => loadClientGeneratorConfig(fileSystem, projectRoot)).toThrow(/'outDir' must be a non-empty string\.\n - 'inlineTypes' must be an object of strings\.\n - 'outFile' is not a setting\./);
         expect(() => loadClientGeneratorConfig(fileSystem, projectRoot, 'other.json')).toThrow(/does not exist/);
+    });
+
+    it('rejects an inlineTypes entry whose key and file disagree about the wildcard', () => {
+        const configPath = nodePath.join(projectRoot, 'netsuite-api.config.json');
+        const fileSystem = createInMemoryFileSystemAdapter({
+            [configPath]: JSON.stringify({ inlineTypes: { '../services/*': 'api/src/services/index.ts', '../shared': 'api/src/shared/*.ts', '../*/*': 'api/src/*/*.ts' } }),
+        });
+        expect(() => loadClientGeneratorConfig(fileSystem, projectRoot)).toThrow(
+            /'inlineTypes' key '\.\.\/services\/\*' has a '\*' but its file 'api\/src\/services\/index\.ts' has none to put the name in\.\n - 'inlineTypes' file 'api\/src\/shared\/\*\.ts' has a '\*' but its key '\.\.\/shared' has none to take the name from\.\n - 'inlineTypes' key '\.\.\/\*\/\*' has more than one '\*'; one stands for the file name\./,
+        );
     });
 });
 

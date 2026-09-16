@@ -1,5 +1,6 @@
 import * as nodePath from 'node:path';
 import ts from 'typescript';
+import { resolveInlineTypesFile } from './config.js';
 import { toPosixPath } from './file-system.js';
 
 /**
@@ -7,8 +8,8 @@ import { toPosixPath } from './file-system.js';
  * defineRestlet or defineSuitelet call, the exported types (the DTOs), and the name, request type and
  * response type of every endpoint in its `defineEndpoints({ ... })`. A parse, not a type check: the
  * handler annotations are the contract, so they must be written out, a DTO may only reference types
- * from the inlined files, the carried modules or another controller, and the script ids are string
- * literals.
+ * from the inlined files (the entity types, the services), the carried modules or another controller,
+ * and the script ids are string literals.
  */
 
 export interface ControllerProblem {
@@ -164,7 +165,7 @@ function readTypeImport(statement: ts.ImportDeclaration, filePath: string, optio
 
     const sibling = siblingControllerSpecifierPattern.exec(moduleSpecifier);
     if (sibling) return { read: { kind: 'controller', typeImport: { controllerName: sibling[1], names } }, problems };
-    if (options.inlineTypes[moduleSpecifier] !== undefined) return { read: { kind: 'inlined', typeImport: { specifier: moduleSpecifier, names } }, problems };
+    if (resolveInlineTypesFile(options.inlineTypes, moduleSpecifier) !== undefined) return { read: { kind: 'inlined', typeImport: { specifier: moduleSpecifier, names } }, problems };
     const clientSpecifier = options.typeImports[moduleSpecifier];
     if (clientSpecifier !== undefined) return { read: { kind: 'carried', typeImport: { moduleSpecifier: clientSpecifier, names } }, problems };
     const allowed = [...Object.keys(options.inlineTypes), ...Object.keys(options.typeImports)].map((specifier) => `'${specifier}'`).join(', ');

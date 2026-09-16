@@ -3,8 +3,8 @@ import type { ControllerContract, DeclaredScript, EndpointSignature, TypeDeclara
 
 /**
  * Writes the generated modules. Each controller gets its own client module, `<name>.gen.ts`: the
- * entity types it names (copied in, so the module stands on its own), its wire shapes, its endpoint
- * type and, when the browser calls it, its client. The index module re-exports each one as a
+ * entity and service types it names (copied in, so the module stands on its own), its wire shapes,
+ * its endpoint type and, when the browser calls it, its client. The index module re-exports each one as a
  * namespace, so a hook writes `user.api.roles()` and names a shape as `user.RolesResponse`. The
  * scripts module is the server-side map a repository passes to createSuiteletClient.
  */
@@ -101,7 +101,7 @@ export function emitControllerModule({ contract, sourceLabel, inlinedTypes }: Em
     ];
     const sections: string[] = [header.join('\n'), imports.join('\n')];
     for (const section of inlinedTypes) {
-        sections.push(`// Entity types from ${section.sourceLabel}, copied so this module stands on its own.`);
+        sections.push(`// Types from ${section.sourceLabel}, copied so this module stands on its own.`);
         for (const declaration of section.declarations) sections.push(declaration.text);
     }
     for (const declaration of contract.typeDeclarations) sections.push(declaration.text);

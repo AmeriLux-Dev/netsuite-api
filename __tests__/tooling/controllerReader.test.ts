@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { isControllerFileName, readControllerContract } from '../../tooling/controllerReader.js';
 import { userControllerSource, userRolesControllerSource } from './fixtures.js';
 
-const options = { typeImports: { '@amerilux/netsuite-api/server': '@amerilux/netsuite-api/client' }, inlineTypes: { '../types/models.gen': 'api/src/types/models.gen.ts' } };
+const options = {
+    typeImports: { '@amerilux/netsuite-api/server': '@amerilux/netsuite-api/client' },
+    inlineTypes: { '../types/models.gen': 'api/src/types/models.gen.ts', '../services/*': 'api/src/services/*.ts' },
+};
 
 const restletHeader = `/**
  * @NApiVersion 2.1
@@ -36,12 +39,12 @@ describe('readControllerContract', () => {
             name: 'userRoles',
             script: { kind: 'suitelet', scriptId: 'customscript_demo_user_roles', deployId: 'customdeploy_demo_user_roles', browser: false },
             carriedTypeImports: [],
-            inlinedTypeImports: [{ specifier: '../types/models.gen', names: [{ name: 'EmployeeRole' }] }],
+            inlinedTypeImports: [{ specifier: '../services/userRolesService', names: [{ name: 'RoleSummary' }] }],
             controllerTypeImports: [],
         });
-        expect(contract?.typeDeclarations.map((declaration) => declaration.name)).toEqual(['RoleSummary', 'ByEmployeeRequest', 'ByEmployeeResponse']);
-        expect(contract?.typeDeclarations[0].text).toBe(
-            "/** A role as the wire carries it: picked from the generated entity type so it follows the model. */\nexport type RoleSummary = Pick<EmployeeRole, 'roleId' | 'roleName'>;",
+        expect(contract?.typeDeclarations.map((declaration) => declaration.name)).toEqual(['ByEmployeeRequest', 'ByEmployeeResponse']);
+        expect(contract?.typeDeclarations[1].text).toBe(
+            'export interface ByEmployeeResponse {\n    employeeId: number;\n    /** Every role assigned to the employee, by name. */\n    roles: RoleSummary[];\n}',
         );
         expect(contract?.endpoints).toEqual([
             {
@@ -50,22 +53,30 @@ describe('readControllerContract', () => {
                 requestOptional: false,
                 responseType: 'ByEmployeeResponse',
                 raw: false,
-                jsDoc: '/**\n     * Every role assigned to the employee; the service answers 400 for a bad id.\n     */',
+                jsDoc: '/**\n     * Every role assigned to the employee; 400 for a bad id.\n     */',
             },
         ]);
     });
 
-    it('reads a Restlet, resolves a type import from a sibling controller and skips the typeof alias of the endpoints', () => {
+    it('reads a Restlet, resolves a type import from a service through the wildcard entry and skips the typeof alias of the endpoints', () => {
         const { contract, problems } = readControllerContract('api/src/controllers/userController.ts', userControllerSource, options);
         expect(problems).toEqual([]);
         expect(contract?.script).toEqual({ kind: 'restlet', scriptId: 'customscript_demo_user', deployId: 'customdeploy_demo_user', browser: true });
         expect(contract?.carriedTypeImports).toEqual([]);
-        expect(contract?.inlinedTypeImports).toEqual([]);
-        expect(contract?.controllerTypeImports).toEqual([{ controllerName: 'userRoles', names: [{ name: 'RoleSummary' }] }]);
+        expect(contract?.inlinedTypeImports).toEqual([{ specifier: '../services/userRolesService', names: [{ name: 'RoleSummary' }] }]);
+        expect(contract?.controllerTypeImports).toEqual([]);
         expect(contract?.typeDeclarations.map((declaration) => declaration.name)).toEqual(['ActiveUserSummary', 'RolesResponse']);
         expect(contract?.endpoints).toEqual([
             { name: 'roles', requestType: undefined, requestOptional: false, responseType: 'RolesResponse', raw: false, jsDoc: '/** The caller and every role assigned to them. Takes no request; the session says who is calling. */' },
         ]);
+    });
+
+    it('resolves a type import from a sibling controller to that controller', () => {
+        const source = userControllerSource.replace("import type { RoleSummary } from '../services/userRolesService';", "import type { RoleSummary } from './userRolesController';");
+        const { contract, problems } = readControllerContract('api/src/controllers/userController.ts', source, options);
+        expect(problems).toEqual([]);
+        expect(contract?.inlinedTypeImports).toEqual([]);
+        expect(contract?.controllerTypeImports).toEqual([{ controllerName: 'userRoles', names: [{ name: 'RoleSummary' }] }]);
     });
 
     it('does not mistake a file comment for the JSDoc of the first type', () => {
@@ -131,13 +142,13 @@ export const thingEndpoints = defineEndpoints({ list: (): Hidden[] => [] });`);
 
     it('rejects a type imported from anywhere but the inlined files, the carried modules or a sibling controller', () => {
         const source = thingController(`
-import type { Thing } from '../services/thingService';
+import type { Thing } from '../helpers/thing';
 import { type Other, doIt } from '../repositories/thingRepository';
 import type * as Models from '../types/models.gen';
 export const thingEndpoints = defineEndpoints({ list: (): Thing[] => doIt() });`);
         expect(messages(source)).toEqual([
-            "type Thing is imported from '../services/thingService'; a controller's wire shapes may only take types from '../types/models.gen', '@amerilux/netsuite-api/server' or from another controller.",
-            "type Other is imported from '../repositories/thingRepository'; a controller's wire shapes may only take types from '../types/models.gen', '@amerilux/netsuite-api/server' or from another controller.",
+            "type Thing is imported from '../helpers/thing'; a controller's wire shapes may only take types from '../types/models.gen', '../services/*', '@amerilux/netsuite-api/server' or from another controller.",
+            "type Other is imported from '../repositories/thingRepository'; a controller's wire shapes may only take types from '../types/models.gen', '../services/*', '@amerilux/netsuite-api/server' or from another controller.",
             "'import type * as Models' from '../types/models.gen' cannot be carried to the client; import the types by name.",
         ]);
     });

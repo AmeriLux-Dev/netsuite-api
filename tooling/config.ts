@@ -24,10 +24,13 @@ export interface ClientGeneratorConfig {
      */
     typeImports: Record<string, string>;
     /**
-     * Type-only files whose declarations are copied into the generated module of every controller
-     * that imports from them, as the specifier written in the controller mapped to the file: the
-     * generated entity types. A controller module carries the types it names, and what those refer
-     * to, so the client needs no copy of the file.
+     * Files whose type declarations are copied into the generated module of every controller that
+     * imports types from them, as the specifier written in the controller mapped to the file: the
+     * generated entity types, and the services (a key with one `*` stands for a file name:
+     * `../services/*` mapped to `api/src/services/*.ts`). A controller module carries the types it
+     * names and what those refer to, following an import from one listed file into another, so the
+     * client needs no copy of any of them. Only the type declarations of a file are read; a service's
+     * functions are not.
      */
     inlineTypes: Record<string, string>;
 }
@@ -46,8 +49,29 @@ export const defaultClientGeneratorConfig: ClientGeneratorConfig = {
     clientModule: '@amerilux/netsuite-api/client',
     wireModule: '@amerilux/netsuite-api',
     typeImports: { '@amerilux/netsuite-api/server': '@amerilux/netsuite-api/client' },
-    inlineTypes: { '../types/models.gen': 'api/src/types/models.gen.ts' },
+    inlineTypes: { '../types/models.gen': 'api/src/types/models.gen.ts', '../services/*': 'api/src/services/*.ts' },
 };
+
+const wildcardInlineTypesKeyPattern = /^([^*]*)\*([^*]*)$/;
+const wildcardSegmentPattern = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * The file an inlineTypes entry names for a specifier: the exact key, or a key with one `*` standing
+ * for a single path segment, substituted into the value. Undefined when no entry matches.
+ */
+export function resolveInlineTypesFile(inlineTypes: Record<string, string>, specifier: string): string | undefined {
+    const exact = inlineTypes[specifier];
+    if (exact !== undefined) return exact;
+    for (const [key, filePattern] of Object.entries(inlineTypes)) {
+        const wildcard = wildcardInlineTypesKeyPattern.exec(key);
+        if (!wildcard) continue;
+        const [, prefix, suffix] = wildcard;
+        if (specifier.length <= prefix.length + suffix.length || !specifier.startsWith(prefix) || !specifier.endsWith(suffix)) continue;
+        const segment = specifier.slice(prefix.length, specifier.length - suffix.length);
+        if (wildcardSegmentPattern.test(segment)) return filePattern.replace('*', segment);
+    }
+    return undefined;
+}
 
 export class ClientGeneratorConfigError extends Error {
     constructor(readonly configPath: string, readonly problems: string[]) {
@@ -78,6 +102,12 @@ function validateClientGeneratorConfig(raw: Record<string, unknown>, configPath:
         if (value === undefined) continue;
         if (isStringMap(value)) config[setting] = value;
         else problems.push(`'${setting}' must be an object of strings.`);
+    }
+    for (const [key, filePattern] of Object.entries(config.inlineTypes)) {
+        const stars = (key.match(/\*/g) ?? []).length;
+        if (stars > 1) problems.push(`'inlineTypes' key '${key}' has more than one '*'; one stands for the file name.`);
+        else if (stars === 1 && !filePattern.includes('*')) problems.push(`'inlineTypes' key '${key}' has a '*' but its file '${filePattern}' has none to put the name in.`);
+        else if (stars === 0 && filePattern.includes('*')) problems.push(`'inlineTypes' file '${filePattern}' has a '*' but its key '${key}' has none to take the name from.`);
     }
     const known = new Set<string>([...stringSettings, ...mapSettings]);
     for (const key of Object.keys(raw)) {

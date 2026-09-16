@@ -1,4 +1,5 @@
 import * as nodePath from 'node:path';
+import { resolveInlineTypesFile } from './config.js';
 import type { ResolvedClientGeneratorConfig } from './config.js';
 import { isControllerFileName, readControllerContract } from './controllerReader.js';
 import type { ControllerProblem } from './controllerReader.js';
@@ -88,13 +89,21 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
         problems.push({ filePath: label(controllersDirectory), message: 'holds no <name>Controller.ts file.' });
     }
     const controllerNames = new Set(controllerFiles.map((filePath) => nodePath.basename(filePath).replace(/Controller\.ts$/, '')));
-    const inlinableFiles = new Map<string, InlinableTypesFile | undefined>();
-    const readInlinable = (specifier: string): InlinableTypesFile | undefined => {
-        if (inlinableFiles.has(specifier)) return inlinableFiles.get(specifier);
-        const filePath = resolve(config.inlineTypes[specifier]);
-        let file: InlinableTypesFile | undefined;
+    const inlinableFiles = new Map<string, InlinableTypesFile | 'missing'>();
+    /** The inlinable file a specifier names, read once; a file that does not exist is reported once and answered as 'missing'. */
+    const readInlinable = (specifier: string): InlinableTypesFile | 'missing' | undefined => {
+        const known = inlinableFiles.get(specifier);
+        if (known !== undefined) return known;
+        const relativePath = resolveInlineTypesFile(config.inlineTypes, specifier);
+        if (relativePath === undefined) return undefined;
+        const filePath = resolve(relativePath);
+        let file: InlinableTypesFile | 'missing';
         if (fileSystem.fileExists(filePath)) file = readInlinableTypesFile(label(filePath), fileSystem.readTextFile(filePath));
-        else problems.push({ filePath: label(filePath), message: 'the file to copy types from does not exist; run the model generator first.' });
+        else {
+            file = 'missing';
+            const hint = config.inlineTypes[specifier] !== undefined ? 'run the model generator first.' : `'${specifier}' names it.`;
+            problems.push({ filePath: label(filePath), message: `the file to copy types from does not exist; ${hint}` });
+        }
         inlinableFiles.set(specifier, file);
         return file;
     };
@@ -117,12 +126,14 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
         const inlinedTypes: InlinedTypeSection[] = [];
         for (const typeImport of contract.inlinedTypeImports) {
             const file = readInlinable(typeImport.specifier);
-            if (!file) continue;
-            const selected = selectInlinedTypes(file, typeImport.names, controllerLabel);
+            if (!file || file === 'missing') continue;
+            const selected = selectInlinedTypes(file, typeImport.names, controllerLabel, readInlinable);
             problems.push(...selected.problems);
-            const section = inlinedTypes.find((existing) => existing.sourceLabel === file.filePath);
-            if (section) section.declarations.push(...selected.declarations.filter((declaration) => !section.declarations.some((existing) => existing.name === declaration.name)));
-            else inlinedTypes.push({ sourceLabel: file.filePath, declarations: selected.declarations });
+            for (const selectedSection of selected.sections) {
+                const section = inlinedTypes.find((existing) => existing.sourceLabel === selectedSection.filePath);
+                if (section) section.declarations.push(...selectedSection.declarations.filter((declaration) => !section.declarations.some((existing) => existing.name === declaration.name)));
+                else inlinedTypes.push({ sourceLabel: selectedSection.filePath, declarations: selectedSection.declarations });
+            }
         }
         emitted.push({ contract, sourceLabel: controllerLabel, inlinedTypes });
     }

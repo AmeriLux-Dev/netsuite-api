@@ -53,7 +53,7 @@ The generator reads the file as source, so a few things are rules rather than co
 
 - Handlers are written inline with their parameter and return types annotated. A reference to a service function carries no types the generator can read.
 - Every type in the file is a wire shape and is exported.
-- A type is imported only from the inlined files (the generated entity types, by default), the carried modules (the package's server entry, for `RawResponse`) or another controller. A service's return type is never used as a DTO by reference.
+- A type is imported only from the inlined files (by default the generated entity types and the services: what a service returns is the domain type a wire shape is built from), the carried modules (the package's server entry, for `RawResponse`) or another controller. A service's function is never referenced by the handler in place of an annotation.
 - The script declaration is an object literal with literal ids, its `name` is the file name without `Controller`, and the entry point export and the `@NScriptType` header agree with the define function.
 - Script ids are unique across controllers, and no wire shape is named `Endpoints`. A shape's name carries no controller prefix: each controller's generated module is its own namespace.
 
@@ -67,7 +67,7 @@ The generator reads the file as source, so a few things are rules rather than co
 // client/src/api/customer.gen.ts
 import { createApiClient } from '@amerilux/netsuite-api/client';
 
-// Entity types from api/src/types/models.gen.ts, copied so this module stands on its own.
+// Types from api/src/types/models.gen.ts, copied so this module stands on its own.
 
 export interface Customer {
     id: number;
@@ -91,7 +91,7 @@ export type Endpoints = {
 export const api = createApiClient<Endpoints>({ kind: 'restlet', scriptId: 'customscript_app_customer', deployId: 'customdeploy_app_customer' });
 ```
 
-A type imported from another controller becomes an import of that controller's module. A type built on something the entity file imports itself (`CustomerCreate`, `CustomerPatch`: the repository package's input types) is an error, because the client could not carry it; write the wire shape out in the controller instead. A generated module no controller owns any more is deleted on the next run.
+A type imported from a service is copied the same way, with the entity types it is built on following it in from the models file. A type imported from another controller becomes an import of that controller's module. A type built on something no inlined file declares (`CustomerCreate`, `CustomerPatch`: the repository package's input types; a type a service imports from a package) is an error, because the client could not carry it; write the wire shape out in the controller instead. So is a type reached through a renamed import (`import type { Employee as EmployeeRecord }`) in a service: import it under its own name. A generated module no controller owns any more is deleted on the next run.
 
 **`client/src/api/index.gen.ts`**, the client's view of the backend: every controller's module re-exported under the controller's name.
 
@@ -118,11 +118,11 @@ A hook imports `{ customer }` from it, calls `customer.api.search({ search: 'acm
   "clientModule": "@amerilux/netsuite-api/client",
   "wireModule": "@amerilux/netsuite-api",
   "typeImports": { "@amerilux/netsuite-api/server": "@amerilux/netsuite-api/client" },
-  "inlineTypes": { "../types/models.gen": "api/src/types/models.gen.ts" }
+  "inlineTypes": { "../types/models.gen": "api/src/types/models.gen.ts", "../services/*": "api/src/services/*.ts" }
 }
 ```
 
-Paths are relative to the config file. `outDir` holds the controller modules and the index, and nothing else. `inlineTypes` maps a specifier as written in a controller to the type-only file whose declarations are copied into the module of every controller importing from it. `typeImports` maps a specifier to the one the client resolves, for a type that stays an import (the package's server entry maps to its client entry so `RawResponse` carries over). A type imported from any other module is an error.
+Paths are relative to the config file. `outDir` holds the controller modules and the index, and nothing else. `inlineTypes` maps a specifier as written in a controller to the file whose type declarations are copied into the module of every controller importing from it; a key with one `*` stands for a file name and the `*` in its file takes that name, so `../services/*` covers every service. Only the type declarations of a file are read, so a service's functions are skipped; a type in one inlined file that refers to a type imported from another (a service's summary type built on an entity type) brings that type along, the import resolved through the same map as written from the same folder depth. `typeImports` maps a specifier to the one the client resolves, for a type that stays an import (the package's server entry maps to its client entry so `RawResponse` carries over). A type imported from any other module is an error.
 
 ## The client at runtime
 
