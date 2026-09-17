@@ -36,6 +36,8 @@ export type {
     JobRef,
     JobRun,
     JobRunError,
+    JobRunListEntry,
+    JobRunQuery,
     JobRunExtraField,
     JobRunsConfig,
     JobRunStage,

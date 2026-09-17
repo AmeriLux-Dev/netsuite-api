@@ -10,7 +10,7 @@ export type JobRunFieldName =
     | 'job'
     | 'status'
     | 'stage'
-    | 'percentComplete'
+    | 'stagePercentComplete'
     | 'input'
     | 'result'
     | 'errors'
@@ -28,7 +28,7 @@ export const JOB_RUN_FIELD_SUFFIXES: Record<JobRunFieldName, string> = {
     job: '_job',
     status: '_status',
     stage: '_stage',
-    percentComplete: '_percent',
+    stagePercentComplete: '_percent',
     input: '_input',
     result: '_result',
     errors: '_errors',

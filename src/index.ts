@@ -146,8 +146,16 @@ export interface JobRun<TResult = unknown, TExtra extends Record<string, unknown
     status: JobRunStatus;
     /** The stage the task is in, or null before it starts and after it ends. */
     stage: JobRunStage | null;
-    /** NetSuite's own estimate, 0 to 100. */
-    percentComplete: number;
+    /**
+     * How far the stage being processed has got, 0 to 100, as NetSuite reports it. It counts up inside a
+     * stage and starts again at the next one, so it is progress rather than a fraction of the whole run;
+     * a finished run reads 100. For something to put next to a progress bar, prefer the item counts.
+     */
+    stagePercentComplete: number;
+    /** Rows the stage being processed has finished, or null when the task can no longer say. */
+    itemsProcessed: number | null;
+    /** Rows the stage being processed was given, or null when the task can no longer say: a run that has ended, or an id NetSuite has purged. */
+    itemsTotal: number | null;
     /** The employee who started it, or null for a scheduled run. */
     startedBy: number | null;
     startedAt: string | null;
@@ -159,6 +167,32 @@ export interface JobRun<TResult = unknown, TExtra extends Record<string, unknown
     errors: JobRunError[];
     /** The fields this application added to the run record, as netsuite-api.config.json declares them. */
     extra: TExtra;
+}
+
+/**
+ * A run as a list shows it: the fields a query can read, so finding a run costs one query rather than a
+ * record load each. It carries no input, result or errors — a page finds a run here and then asks about
+ * it by id, which is also the only reading that consults the task, so a `running` row in a list is
+ * "last we knew", not a promise.
+ */
+export interface JobRunListEntry {
+    id: string;
+    job: string;
+    status: JobRunStatus;
+    stage: JobRunStage | null;
+    stagePercentComplete: number;
+    startedBy: number | null;
+}
+
+/** Which runs to list. Every field narrows; the newest are answered first. */
+export interface JobRunQuery {
+    job?: string;
+    /** The employee who started them: how a page finds its own caller's runs again. */
+    startedBy?: number;
+    /** Only runs that have not ended, for "is one of these already going?". */
+    unfinishedOnly?: boolean;
+    /** How many, newest first. Defaults to 10, capped at 100. */
+    limit?: number;
 }
 
 /** One deployed job as server code starts it: `scripts.<job>` in the generated scripts map. */
@@ -195,7 +229,7 @@ export interface JobRunsConfig {
         job: string;
         status: string;
         stage: string;
-        percentComplete: string;
+        stagePercentComplete: string;
         input: string;
         result: string;
         errors: string;

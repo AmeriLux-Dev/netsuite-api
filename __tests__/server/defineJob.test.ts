@@ -19,7 +19,7 @@ const jobRuns: JobRunsConfig = {
         job: 'custrecord_demo_jr_job',
         status: 'custrecord_demo_jr_status',
         stage: 'custrecord_demo_jr_stage',
-        percentComplete: 'custrecord_demo_jr_percent',
+        stagePercentComplete: 'custrecord_demo_jr_percent',
         input: 'custrecord_demo_jr_input',
         result: 'custrecord_demo_jr_result',
         errors: 'custrecord_demo_jr_errors',
@@ -240,6 +240,25 @@ describe('summarize', () => {
 
         job.summarize(summarizeContextFor());
 
+        expect(rows.get('1')).toMatchObject({ custrecord_demo_jr_status: 'complete', custrecord_demo_jr_result: 'null' });
+    });
+
+    it('closes the run for a summarize stage that does its work and returns nothing', () => {
+        const notified: number[] = [];
+        const job = defineJob(
+            { name: 'closeStaleOrders', scriptId: 'customscript_demo_close_stale_mr', deployments: ['customdeploy_demo_close_stale_mr'], runParameter: 'custscript_demo_close_stale_run', runs: jobRuns },
+            {
+                getInputData: (): StaleOrder[] => [],
+                map: (): void => undefined,
+                summarize: (summary: JobSummary<number>): void => {
+                    notified.push(summary.output.length);
+                },
+            },
+        );
+
+        job.summarize(summarizeContextFor({ output: [{ key: 'Acme', value: 1 }] }));
+
+        expect(notified).toEqual([1]);
         expect(rows.get('1')).toMatchObject({ custrecord_demo_jr_status: 'complete', custrecord_demo_jr_result: 'null' });
     });
 

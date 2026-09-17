@@ -227,21 +227,32 @@ export const { getInputData, map, summarize } = defineJob({
 
 The first parameter of `getInputData` is the run's input and the return type of `summarize` is its result: the generator reads the shapes from those two annotations, the way it reads an endpoint's request and response. The values carried between stages are JSON, so each stage annotates what it expects (`values: number[]` on a reduce stage, `summary: JobSummary<Total>` on summarize) and the wrapper hands them back that way. Export the stages the job has, and `summarize` always: the run is closed there. A stage exported without being declared throws when NetSuite calls it, rather than quietly passing values through.
 
-Starting a run is a repository's work, because it writes a record and submits a task:
+Plenty of jobs answer nothing, because the records they write are the point. Such a job declares no `summarize` and still exports it, and the wrapper closes the run for it; one that wants a last word without a result (a notification when the run ends) declares `summarize` with a `void` return. Either way the run's `Result` is `null`, and a page watches `status`, the progress fields and `errors` instead of a result.
+
+Reading a run asks the task about progress as well. `stagePercentComplete` is `getPercentageCompleted()`, which NetSuite documents as the percentage complete of the **stage being processed**, so it counts to 100 once per stage; `itemsProcessed` and `itemsTotal` come from that stage's `getTotal*Count()` and `getPending*Count()` pair and only go up. The record keeps the percent (100 once a run ends) but never the counts, so the counts are null for a run that has ended or whose task id NetSuite has purged — by then the run has the result, which the record did keep.
+
+The store belongs in a repository, because it writes a record and submits a task. Keep it job-agnostic: whatever decides a run should start (a service, in the layout the template scaffolds) passes the job and the input.
 
 ```ts
+// api/src/repositories/jobRunRepository.ts
 import { createJobRunStore } from '@amerilux/netsuite-api/server';
-import { jobRuns, jobs } from '../scripts.gen';
+import type { JobRef, JobRun } from '@amerilux/netsuite-api/server';
+import { jobRuns } from '../scripts.gen';
 
 const jobRunStore = createJobRunStore(jobRuns);
 
-export const startCloseStaleOrders = (olderThanDays: number) => jobRunStore.start(jobs.closeStaleOrders, { olderThanDays });
-export const readJobRun = (runId: string) => jobRunStore.read(runId);
+export const startJobRun = (job: JobRef, input: unknown): string => jobRunStore.start(job, input);
+export const findJobRun = (runId: string): JobRun | null => jobRunStore.read(runId);
+
+// api/src/services/ordersService.ts
+export const startClosingOldOrders = (olderThanDays: number) => startJobRun(jobs.closeOldOrders, { olderThanDays } satisfies CloseOldOrdersRequest);
 ```
 
 `start` writes the run, then submits the task to the first deployment that takes it; NetSuite runs one instance of a deployment at a time, so the list in the declaration is how many runs can overlap. When they are all running it throws `ApiError.conflict` (409) and removes the run it had written, because nothing started. A controller endpoint hands the run id to the browser, which polls another endpoint for `read`.
 
 `read` is the reason a dead run does not look like a working one: it takes status, stage and progress from `N/task.checkStatus` as well as the record, so a task NetSuite gave up on is `failed`, and a task that finished without writing a result is `failed` too. `findExpired(days)` and `remove` are what a cleanup job runs on a schedule; run records are not meant to be permanent.
+
+`findRuns({ job, startedBy, unfinishedOnly, limit })` answers the matching runs newest first, in one query and without loading a record: it is how a page finds the run it lost track of, because the run knows who started it even after a browser has forgotten. Its rows carry what the record says, not what the task says, so read a run by id before believing one is still working.
 
 ### The run record
 

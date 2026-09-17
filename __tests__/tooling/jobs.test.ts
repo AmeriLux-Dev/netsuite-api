@@ -158,6 +158,17 @@ describe('planClientGeneration with jobs', () => {
         expect(module).not.toContain('createApiClient');
     });
 
+    it('gives a job that answers nothing a null result, whether it has a summarize stage or not', () => {
+        const withoutSummarize = jobSource(validDeclaration, validStages.replace('    summarize: (summary): { days: number } => ({ days: summary.output.length }),\n', ''));
+        const returningVoid = jobSource(validDeclaration, validStages.replace(': { days: number } => ({ days: summary.output.length })', ': void => undefined'));
+
+        for (const source of [withoutSummarize, returningVoid]) {
+            const module = planClientGeneration(optionsFor(projectFiles({ [nodePath.join(jobsDirectory, 'closeStaleOrders.ts')]: source })))
+                .files.find((file) => file.path === nodePath.join(clientDirectory, 'closeStaleOrdersJob.gen.ts'))?.content ?? '';
+            expect(module).toContain('export type Result = null;');
+        }
+    });
+
     it('reaches the jobs under `jobs` from the client index', () => {
         const plan = planClientGeneration(optionsFor(projectFiles()));
 

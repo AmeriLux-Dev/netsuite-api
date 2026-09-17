@@ -85,6 +85,8 @@ export interface EmittedJob {
 }
 
 const INDENT = '    ';
+/** What a summarize stage returns when the run has no result to carry; the run record holds null either way. */
+const RESULTLESS_TYPE_NAMES = new Set(['void', 'undefined', 'null', 'never']);
 const EDIT_NOTICE = 'Do not edit: change the controller and run `npm run generate`.';
 const ESLINT_DISABLE = '/* eslint-disable */';
 
@@ -191,7 +193,9 @@ export function emitJobModule({ contract, sourceLabel, inlinedTypes }: EmittedJo
     }
     for (const declaration of contract.typeDeclarations) declarations.push(writeDatesAsStrings(declaration.text, 'declaration'));
     const inputType = contract.inputType === undefined ? 'void' : writeDatesAsStrings(contract.inputType, 'type');
-    const resultType = contract.resultType === undefined ? 'null' : writeDatesAsStrings(contract.resultType, 'type');
+    // A job that answers nothing has no summarize, or one that returns nothing: either way the run's result is null,
+    // which is what the record holds and what the page reads back.
+    const resultType = contract.resultType === undefined || RESULTLESS_TYPE_NAMES.has(contract.resultType.trim()) ? 'null' : writeDatesAsStrings(contract.resultType, 'type');
     // A job's stages name package types the run's shapes do not (JobSummary on summarize), and those are
     // server-side: only an import a shape actually reaches is carried over.
     const emittedText = [...declarations, inputType, resultType].join('\n');

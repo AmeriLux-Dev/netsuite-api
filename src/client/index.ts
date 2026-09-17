@@ -14,6 +14,8 @@ export type {
     EndpointResponse,
     JobRun,
     JobRunError,
+    JobRunListEntry,
+    JobRunQuery,
     JobRunStage,
     JobRunStatus,
     RawResponse,

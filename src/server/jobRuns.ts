@@ -3,7 +3,7 @@ import * as query from 'N/query';
 import * as record from 'N/record';
 import * as runtime from 'N/runtime';
 import * as task from 'N/task';
-import type { JobRef, JobRun, JobRunError, JobRunStage, JobRunStatus, JobRunsConfig, NetsuiteValueType } from '../index.js';
+import type { JobRef, JobRun, JobRunError, JobRunListEntry, JobRunQuery, JobRunStage, JobRunStatus, JobRunsConfig, NetsuiteValueType } from '../index.js';
 import { ApiError } from './apiError.js';
 
 /**
@@ -49,6 +49,12 @@ export interface JobRunStore {
     start(job: JobRef, input?: unknown, options?: StartJobOptions): string;
     /** The run as anyone asking sees it: the record refined by what NetSuite says about the task. Null when the record is gone (cleaned up, or never existed). */
     read<TResult = unknown, TExtra extends Record<string, unknown> = Record<string, never>>(runId: string): JobRun<TResult, TExtra> | null;
+    /**
+     * The runs matching the query, newest first: one query, no record loads, so a page can find the run it
+     * lost track of. The rows carry what the record says and not what the task says, so read a run by id
+     * before believing it is still working.
+     */
+    findRuns(runQuery?: JobRunQuery): JobRunListEntry[];
     /** Run ids older than the given number of days, for the cleanup job. */
     findExpired(olderThanDays: number): string[];
     remove(runId: string): void;
@@ -71,6 +77,15 @@ const STAGE_BY_TASK_STAGE: Record<string, JobRunStage> = {
     REDUCE: 'reduce',
     SUMMARIZE: 'summarize',
 };
+
+/** What a task check yields, before the record it refines. */
+interface TaskReading {
+    status?: string;
+    stage?: string;
+    stagePercentComplete: number;
+    itemsProcessed: number | null;
+    itemsTotal: number | null;
+}
 
 /** NetSuite hands a field back as whatever it stores; the declared type says what the code asked for. */
 function readTypedValue(raw: unknown, type: NetsuiteValueType): unknown {
@@ -146,17 +161,34 @@ export function createJobRunStore(config: JobRunsConfig): JobRunStore {
     }
 
     /** The task as NetSuite sees it, or undefined when it can no longer say (an id it has purged). */
-    function checkTask(taskId: string): { status?: string; stage?: string; percentComplete: number } | undefined {
+    function checkTask(taskId: string): TaskReading | undefined {
         try {
             const status = task.checkStatus({ taskId }) as unknown as {
                 status?: string;
                 stage?: string;
                 getPercentageCompleted?: () => number;
+                getTotalMapCount?: () => number;
+                getPendingMapCount?: () => number;
+                getTotalReduceCount?: () => number;
+                getPendingReduceCount?: () => number;
             };
+            /** One of the task's counts, called on the task itself, or null when it has none to give. */
+            const readCount = (getterName: 'getTotalMapCount' | 'getPendingMapCount' | 'getTotalReduceCount' | 'getPendingReduceCount'): number | null => {
+                const getter = status[getterName];
+                if (typeof getter !== 'function') return null;
+                const count = Number(getter.call(status));
+                return Number.isFinite(count) ? count : null;
+            };
+            const stage = status.stage ?? undefined;
+            // Every count belongs to the stage being worked, so only map and reduce have one to give.
+            const total = stage === 'MAP' ? readCount('getTotalMapCount') : stage === 'REDUCE' ? readCount('getTotalReduceCount') : null;
+            const pending = stage === 'MAP' ? readCount('getPendingMapCount') : stage === 'REDUCE' ? readCount('getPendingReduceCount') : null;
             return {
                 status: status.status ?? undefined,
-                stage: status.stage ?? undefined,
-                percentComplete: typeof status.getPercentageCompleted === 'function' ? Number(status.getPercentageCompleted()) || 0 : 0,
+                stage,
+                stagePercentComplete: typeof status.getPercentageCompleted === 'function' ? Number(status.getPercentageCompleted()) || 0 : 0,
+                itemsTotal: total,
+                itemsProcessed: total === null || pending === null ? null : Math.max(total - pending, 0),
             };
         } catch (error) {
             log.debug('job task unknown', { taskId, message: error instanceof Error ? error.message : String(error) });
@@ -193,7 +225,10 @@ export function createJobRunStore(config: JobRunsConfig): JobRunStore {
             const readValue = (fieldId: string) => runRecord.getValue({ fieldId });
             let status = (readValue(fields.status) || 'pending') as JobRunStatus;
             let stage = (readValue(fields.stage) || null) as JobRunStage | null;
-            let percentComplete = Number(readValue(fields.percentComplete)) || 0;
+            let stagePercentComplete = Number(readValue(fields.stagePercentComplete)) || 0;
+            // Counts come from the task alone, so they are there while it is working and null once it is not.
+            let itemsProcessed: number | null = null;
+            let itemsTotal: number | null = null;
             const errors = parseJsonField(readValue(fields.errors), []) as JobRunError[];
             const taskId = (readValue(fields.taskId) || null) as string | null;
 
@@ -210,7 +245,9 @@ export function createJobRunStore(config: JobRunsConfig): JobRunStore {
                 } else if (taskStatus?.status === 'PROCESSING') {
                     status = 'running';
                     stage = (taskStatus.stage && STAGE_BY_TASK_STAGE[taskStatus.stage]) || stage;
-                    percentComplete = taskStatus.percentComplete || percentComplete;
+                    stagePercentComplete = taskStatus.stagePercentComplete || stagePercentComplete;
+                    itemsProcessed = taskStatus.itemsProcessed;
+                    itemsTotal = taskStatus.itemsTotal;
                 }
             }
 
@@ -222,7 +259,9 @@ export function createJobRunStore(config: JobRunsConfig): JobRunStore {
                 job: String(readValue(fields.job) ?? ''),
                 status,
                 stage,
-                percentComplete,
+                stagePercentComplete,
+                itemsProcessed,
+                itemsTotal,
                 startedBy: Number.isNaN(startedBy) || startedBy === 0 ? null : startedBy,
                 startedAt: readDateField(readValue(fields.startedAt)),
                 finishedAt: readDateField(readValue(fields.finishedAt)),
@@ -231,6 +270,36 @@ export function createJobRunStore(config: JobRunsConfig): JobRunStore {
                 errors,
                 extra: extra as TExtra,
             };
+        },
+
+        findRuns(runQuery = {}) {
+            const conditions: string[] = [];
+            const params: (string | number)[] = [];
+            if (runQuery.job !== undefined) {
+                conditions.push(`${fields.job} = ?`);
+                params.push(runQuery.job);
+            }
+            if (runQuery.startedBy !== undefined) {
+                conditions.push(`${fields.startedBy} = ?`);
+                params.push(runQuery.startedBy);
+            }
+            if (runQuery.unfinishedOnly === true) conditions.push(`(${fields.status} IS NULL OR ${fields.status} IN ('pending', 'running'))`);
+            const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
+            const limit = Math.min(Math.max(runQuery.limit ?? 10, 1), 100);
+            const rows = query
+                .runSuiteQL({
+                    query: `SELECT id, ${fields.job} AS job, ${fields.status} AS status, ${fields.stage} AS stage, ${fields.stagePercentComplete} AS percent, ${fields.startedBy} AS startedby FROM ${recordType}${where} ORDER BY id DESC FETCH FIRST ${limit} ROWS ONLY`,
+                    params,
+                })
+                .asMappedResults() as { id: string | number; job: string; status: string; stage: string; percent: string | number; startedby: string | number | null }[];
+            return rows.map((row) => ({
+                id: String(row.id),
+                job: String(row.job ?? ''),
+                status: (row.status || 'pending') as JobRunStatus,
+                stage: (row.stage || null) as JobRunStage | null,
+                stagePercentComplete: Number(row.percent) || 0,
+                startedBy: row.startedby === null || row.startedby === undefined || row.startedby === '' ? null : Number(row.startedby),
+            }));
         },
 
         findExpired(olderThanDays) {
@@ -275,7 +344,7 @@ export function createJobRunStore(config: JobRunsConfig): JobRunStore {
             writeFields(runId, {
                 [fields.status]: status,
                 [fields.stage]: 'summarize' satisfies JobRunStage,
-                [fields.percentComplete]: 100,
+                [fields.stagePercentComplete]: 100,
                 [fields.result]: JSON.stringify(result ?? null),
                 [fields.errors]: JSON.stringify(errors),
                 [fields.finishedAt]: new Date(),

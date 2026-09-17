@@ -20,7 +20,7 @@ const jobRuns: JobRunsConfig = {
         job: 'custrecord_demo_jr_job',
         status: 'custrecord_demo_jr_status',
         stage: 'custrecord_demo_jr_stage',
-        percentComplete: 'custrecord_demo_jr_percent',
+        stagePercentComplete: 'custrecord_demo_jr_percent',
         input: 'custrecord_demo_jr_input',
         result: 'custrecord_demo_jr_result',
         errors: 'custrecord_demo_jr_errors',
@@ -73,7 +73,13 @@ beforeEach(() => {
         rows.delete(String(id));
     }) as never);
     runSuiteQL.mockReturnValue({ asMappedResults: () => [] } as never);
-    checkStatus.mockReturnValue({ status: 'PROCESSING', stage: 'MAP', getPercentageCompleted: () => 40 } as never);
+    checkStatus.mockReturnValue({
+        status: 'PROCESSING',
+        stage: 'MAP',
+        getPercentageCompleted: () => 40,
+        getTotalMapCount: () => 20000,
+        getPendingMapCount: () => 11588,
+    } as never);
 });
 
 describe('start', () => {
@@ -152,7 +158,85 @@ describe('read', () => {
 
         const run = store.read(runId);
 
-        expect(run).toMatchObject({ id: runId, job: 'closeStaleOrders', status: 'running', stage: 'map', percentComplete: 40, taskId: 'TASK_1' });
+        expect(run).toMatchObject({
+            id: runId,
+            job: 'closeStaleOrders',
+            status: 'running',
+            stage: 'map',
+            stagePercentComplete: 40,
+            itemsProcessed: 8412,
+            itemsTotal: 20000,
+            taskId: 'TASK_1',
+        });
+    });
+
+    it('counts the reduce stage once the task is reducing', () => {
+        const store = createJobRunStore(jobRuns);
+        createTask.mockReturnValue({ submit: vi.fn(() => 'TASK_5') } as never);
+        const runId = store.start(closeStaleOrders, {});
+        checkStatus.mockReturnValue({
+            status: 'PROCESSING',
+            stage: 'REDUCE',
+            getPercentageCompleted: () => 25,
+            getTotalMapCount: () => 20000,
+            getPendingMapCount: () => 0,
+            getTotalReduceCount: () => 400,
+            getPendingReduceCount: () => 300,
+        } as never);
+
+        const run = store.read(runId);
+
+        // The reduce stage's own rows, not the map stage's: a count belongs to the stage being worked.
+        expect(run).toMatchObject({ stage: 'reduce', stagePercentComplete: 25, itemsProcessed: 100, itemsTotal: 400 });
+    });
+
+    it('reads the counts off the task, which needs the task to read them on', () => {
+        const store = createJobRunStore(jobRuns);
+        createTask.mockReturnValue({ submit: vi.fn(() => 'TASK_11') } as never);
+        const runId = store.start(closeStaleOrders, {});
+        // NetSuite's own status object counts through itself, so a getter taken off it and called alone throws.
+        const taskStatus = {
+            status: 'PROCESSING',
+            stage: 'MAP',
+            rows: 500,
+            getPercentageCompleted: () => 50,
+            getTotalMapCount() {
+                return this.rows;
+            },
+            getPendingMapCount() {
+                return this.rows / 5;
+            },
+        };
+        checkStatus.mockReturnValue(taskStatus as never);
+
+        const run = store.read(runId);
+
+        expect(run).toMatchObject({ itemsProcessed: 400, itemsTotal: 500 });
+    });
+
+    it('leaves the counts empty in a stage that has none', () => {
+        const store = createJobRunStore(jobRuns);
+        createTask.mockReturnValue({ submit: vi.fn(() => 'TASK_6') } as never);
+        const runId = store.start(closeStaleOrders, {});
+        checkStatus.mockReturnValue({ status: 'PROCESSING', stage: 'GET_INPUT', getPercentageCompleted: () => 0 } as never);
+
+        const run = store.read(runId);
+
+        expect(run).toMatchObject({ stage: 'input', itemsProcessed: null, itemsTotal: null });
+    });
+
+    it('leaves the counts empty when NetSuite no longer knows the task', () => {
+        const store = createJobRunStore(jobRuns);
+        createTask.mockReturnValue({ submit: vi.fn(() => 'TASK_10') } as never);
+        const runId = store.start(closeStaleOrders, {});
+        checkStatus.mockImplementation((() => {
+            throw new Error('That task id is unknown.');
+        }) as never);
+
+        const run = store.read(runId);
+
+        // Nothing to refine the record with, so it answers the record as it stands and no counts.
+        expect(run).toMatchObject({ status: 'pending', itemsProcessed: null, itemsTotal: null });
     });
 
     it('calls a run failed when NetSuite stopped the task', () => {
@@ -189,9 +273,53 @@ describe('read', () => {
         const run = store.read<{ closed: number }, { customerId: number }>(runId);
 
         expect(checkStatus).not.toHaveBeenCalled();
-        expect(run).toMatchObject({ status: 'complete', percentComplete: 100, result: { closed: 3 }, extra: { customerId: 7 } });
+        expect(run).toMatchObject({ status: 'complete', stagePercentComplete: 100, itemsProcessed: null, itemsTotal: null, result: { closed: 3 }, extra: { customerId: 7 } });
         expect(run?.errors).toHaveLength(1);
         expect(run?.finishedAt).not.toBeNull();
+    });
+});
+
+describe('findRuns', () => {
+    it('answers the caller its own runs of one job, newest first, without loading a record', () => {
+        runSuiteQL.mockReturnValue({
+            asMappedResults: () => [
+                { id: 9, job: 'closeStaleOrders', status: 'running', stage: 'map', percent: 40, startedby: 7 },
+                { id: 4, job: 'closeStaleOrders', status: 'complete', stage: 'summarize', percent: 100, startedby: 7 },
+            ],
+        } as never);
+
+        const runs = createJobRunStore(jobRuns).findRuns({ job: 'closeStaleOrders', startedBy: 7, limit: 5 });
+
+        expect(runs).toEqual([
+            { id: '9', job: 'closeStaleOrders', status: 'running', stage: 'map', stagePercentComplete: 40, startedBy: 7 },
+            { id: '4', job: 'closeStaleOrders', status: 'complete', stage: 'summarize', stagePercentComplete: 100, startedBy: 7 },
+        ]);
+        expect(loadRecord).not.toHaveBeenCalled();
+        const sent = runSuiteQL.mock.calls[0][0] as { query: string; params: unknown[] };
+        expect(sent.params).toEqual(['closeStaleOrders', 7]);
+        expect(sent.query).toContain('FETCH FIRST 5 ROWS ONLY');
+        expect(sent.query).toContain('ORDER BY id DESC');
+    });
+
+    it('narrows to the runs that have not ended, for "is one already going?"', () => {
+        runSuiteQL.mockReturnValue({ asMappedResults: () => [] } as never);
+
+        createJobRunStore(jobRuns).findRuns({ job: 'closeStaleOrders', unfinishedOnly: true });
+
+        const sent = runSuiteQL.mock.calls[0][0] as { query: string; params: unknown[] };
+        expect(sent.query).toContain("IN ('pending', 'running')");
+        expect(sent.params).toEqual(['closeStaleOrders']);
+    });
+
+    it('lists every job and caps how many it answers', () => {
+        runSuiteQL.mockReturnValue({ asMappedResults: () => [] } as never);
+
+        createJobRunStore(jobRuns).findRuns({ limit: 5000 });
+
+        const sent = runSuiteQL.mock.calls[0][0] as { query: string; params: unknown[] };
+        expect(sent.query).not.toContain('WHERE');
+        expect(sent.query).toContain('FETCH FIRST 100 ROWS ONLY');
+        expect(sent.params).toEqual([]);
     });
 });
 
