@@ -2,11 +2,11 @@
 
 The API layer for a NetSuite single-page app. The app's server side is SuiteScript; its browser side is a bundle served by a Suitelet. This package holds what sits between them, so a project writes controllers and services and nothing else:
 
-- **`@amerilux/netsuite-api/server`**: declare a controller's endpoints and the script that serves them, expose them as a Restlet or a Suitelet, reject a call with an `ApiError`, call another Suitelet controller from server code, and find a File Cabinet file by name.
+- **`@amerilux/netsuite-api/server`**: declare a controller's endpoints and the script that serves them, expose them as a Restlet or a Suitelet, reject a call with an `ApiError`, call another Suitelet controller from server code, write a Map/Reduce job as stages and start one, and find a File Cabinet file by name.
 - **`@amerilux/netsuite-api/client`**: a typed browser client per controller, built from the endpoint types.
 - **`@amerilux/netsuite-api/testing`**: stubs for the `N/*` modules and the vitest wiring that routes imports to them.
-- **`netsuite-api generate`**: reads the controllers and writes the client's whole view of the backend, one module per controller and an index re-exporting them, plus the server-side map of scripts. The client never imports from the server tree.
-- **`@amerilux/netsuite-api`** (the root): the wire itself. The envelope, the endpoint types, `ScriptDeclaration`, `ScriptRef`.
+- **`netsuite-api generate`**: reads the controllers and the jobs and writes the client's whole view of the backend, one module each and an index re-exporting them, plus the server-side map of scripts and jobs. The client never imports from the server tree.
+- **`@amerilux/netsuite-api`** (the root): the wire itself. The envelope, the endpoint types, `ScriptDeclaration`, `ScriptRef`, `JobRef`, `JobRun`.
 
 The layout it assumes is the one `create-netsuite-project` scaffolds: `api/` (SuiteScript) and `client/` (React) as workspaces.
 
@@ -115,6 +115,7 @@ A hook imports `{ customer }` from it, calls `customer.api.search({ search: 'acm
 ```json
 {
   "controllers": "api/src/controllers",
+  "jobs": "api/src/jobs",
   "outDir": "client/src/api",
   "scriptsOutFile": "api/src/scripts.gen.ts",
   "clientModule": "@amerilux/netsuite-api/client",
@@ -124,7 +125,7 @@ A hook imports `{ customer }` from it, calls `customer.api.search({ search: 'acm
 }
 ```
 
-Paths are relative to the config file. `outDir` holds the controller modules and the index, and nothing else. `inlineTypes` maps a specifier as written in a controller to the file whose type declarations are copied into the module of every controller importing from it; a key with one `*` stands for a file name and the `*` in its file takes that name, so `../services/*` covers every service. Only the type declarations of a file are read, so a service's functions are skipped; a type in one inlined file that refers to a type imported from another (a service's summary type built on an entity type) brings that type along, the import resolved through the same map as written from the same folder depth. `typeImports` maps a specifier to the one the client resolves, for a type that stays an import (the package's server entry maps to its client entry so `RawResponse` carries over). A type imported from any other module is an error.
+Paths are relative to the config file. `outDir` holds the controller and job modules and their indexes, and nothing else. A project with jobs adds a `jobRuns` block naming the run record it deployed; see **Jobs**. `inlineTypes` maps a specifier as written in a controller to the file whose type declarations are copied into the module of every controller importing from it; a key with one `*` stands for a file name and the `*` in its file takes that name, so `../services/*` covers every service. Only the type declarations of a file are read, so a service's functions are skipped; a type in one inlined file that refers to a type imported from another (a service's summary type built on an entity type) brings that type along, the import resolved through the same map as written from the same folder depth. `typeImports` maps a specifier to the one the client resolves, for a type that stays an import (the package's server entry maps to its client entry so `RawResponse` carries over). A type imported from any other module is an error.
 
 ## The client at runtime
 
@@ -192,9 +193,73 @@ const userRolesApi = createSuiteletClient<UserRolesEndpoints>(scripts.userRoles)
 export const listRolesForEmployee = (employeeId: number) => userRolesApi.byEmployee({ employeeId }).roles;
 ```
 
+## Jobs
+
+A job is a Map/Reduce script written as stages. What the wrapper adds is the run: a Map/Reduce answers nothing and cannot be waited on, so every run is a row in a record of the application's own, and that row is what server code and the browser talk about.
+
+```ts
+/**
+ * @NApiVersion 2.1
+ * @NScriptType MapReduceScript
+ */
+import { defineJob } from '@amerilux/netsuite-api/server';
+import { jobRuns } from '../scripts.gen';
+import { closeOrder, listStaleOrders, type StaleOrder } from '../services/staleOrderService';
+
+export interface CloseStaleRequest { olderThanDays: number }
+export interface CloseStaleResult { closed: number }
+
+export const { getInputData, map, summarize } = defineJob({
+    name: 'closeStaleOrders',
+    scriptId: 'customscript_app_close_stale_mr',
+    deployments: ['customdeploy_app_close_stale_mr', 'customdeploy_app_close_stale_mr_2'],
+    runParameter: 'custscript_app_close_stale_run',
+    parameters: { batchSize: { id: 'custscript_app_close_stale_batch', type: 'integer' } },
+    runs: jobRuns,
+}, {
+    getInputData: (input: CloseStaleRequest): StaleOrder[] => listStaleOrders(input.olderThanDays),
+    map: (order: StaleOrder, job): void => {
+        if (closeOrder(order.id)) job.write(String(order.id), order.id);
+    },
+    summarize: (summary): CloseStaleResult => ({ closed: summary.output.length }),
+});
+```
+
+The first parameter of `getInputData` is the run's input and the return type of `summarize` is its result: the generator reads the shapes from those two annotations, the way it reads an endpoint's request and response. The values carried between stages are JSON, so each stage annotates what it expects (`values: number[]` on a reduce stage, `summary: JobSummary<Total>` on summarize) and the wrapper hands them back that way. Export the stages the job has, and `summarize` always: the run is closed there. A stage exported without being declared throws when NetSuite calls it, rather than quietly passing values through.
+
+Starting a run is a repository's work, because it writes a record and submits a task:
+
+```ts
+import { createJobRunStore } from '@amerilux/netsuite-api/server';
+import { jobRuns, jobs } from '../scripts.gen';
+
+const jobRunStore = createJobRunStore(jobRuns);
+
+export const startCloseStaleOrders = (olderThanDays: number) => jobRunStore.start(jobs.closeStaleOrders, { olderThanDays });
+export const readJobRun = (runId: string) => jobRunStore.read(runId);
+```
+
+`start` writes the run, then submits the task to the first deployment that takes it; NetSuite runs one instance of a deployment at a time, so the list in the declaration is how many runs can overlap. When they are all running it throws `ApiError.conflict` (409) and removes the run it had written, because nothing started. A controller endpoint hands the run id to the browser, which polls another endpoint for `read`.
+
+`read` is the reason a dead run does not look like a working one: it takes status, stage and progress from `N/task.checkStatus` as well as the record, so a task NetSuite gave up on is `failed`, and a task that finished without writing a result is `failed` too. `findExpired(days)` and `remove` are what a cleanup job runs on a schedule; run records are not meant to be permanent.
+
+### The run record
+
+The shape is this package's and the ids are the application's, because the record carries the application's prefix. `netsuite-api.config.json` names them and the generator writes them into the scripts map as `jobRuns`:
+
+```json
+"jobRuns": {
+  "recordType": "customrecord_app_job_run",
+  "fieldPrefix": "custrecord_app_jr",
+  "extraFields": { "customerId": { "id": "custrecord_app_jr_customer", "type": "integer" } }
+}
+```
+
+Each field's id is the prefix plus a short suffix (`_job`, `_status`, `_stage`, `_percent`, `_input`, `_result`, `_errors`, `_task`, `_deploy`, `_by`, `_start`, `_end`); `fields` overrides any one of them for a record whose field is named differently. `extraFields` are the fields the application added: `start` sets them (`{ extra: { customerId } }`) and a run reports them back under `extra`, typed.
+
 ## Tests
 
-`N/*` modules exist only inside NetSuite. The `testing` entry ships a stub per module, each export a `vi.fn()`, and the vitest wiring:
+`N/*` modules exist only inside NetSuite. The `testing` entry ships a stub per module, each export a `vi.fn()`, the Map/Reduce contexts a job's stages are called with (`mapContextFor`, `reduceContextFor`, `summarizeContextFor`, each capturing what the stage wrote), and the vitest wiring:
 
 ```ts
 import { inlinedPackagesForNetsuiteStubs, netsuiteModuleStubAliases } from '@amerilux/netsuite-api/testing';

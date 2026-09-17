@@ -14,6 +14,10 @@ import { fileURLToPath } from 'node:url';
  * This module runs in the vitest config, so it never imports vitest itself.
  */
 
+/** The Map/Reduce contexts a job's stages are called with, as plain objects: what a job test builds its calls from. */
+export { getInputDataContextFor, mapContextFor, reduceContextFor, summarizeContextFor } from './jobs.js';
+export type { CapturedJobValue, MapContextFake, ReduceContextFake } from './jobs.js';
+
 /** Absolute directory of the stub modules, one file per N/* module (N/ui/serverWidget included). */
 export const netsuiteModuleStubsDirectory = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'N');
 

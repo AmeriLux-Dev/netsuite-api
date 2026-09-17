@@ -1,10 +1,24 @@
 import * as nodePath from 'node:path';
-import { resolveInlineTypesFile } from './config.js';
+import { resolveInlineTypesFile, resolveJobRunFieldIds } from './config.js';
 import type { ResolvedClientGeneratorConfig } from './config.js';
 import { isControllerFileName, readControllerContract } from './controllerReader.js';
 import type { ControllerContract, ControllerProblem } from './controllerReader.js';
-import { CLIENT_INDEX_FILE_NAME, controllerModuleFileName, emitClientIndexModule, emitControllerModule, emitScriptsModule, sortControllers } from './emit.js';
-import type { EmittedController, InlinedTypeSection } from './emit.js';
+import {
+    CLIENT_INDEX_FILE_NAME,
+    JOBS_INDEX_FILE_NAME,
+    controllerModuleFileName,
+    emitClientIndexModule,
+    emitControllerModule,
+    emitJobModule,
+    emitJobsIndexModule,
+    emitScriptsModule,
+    jobModuleFileName,
+    sortControllers,
+    sortJobs,
+} from './emit.js';
+import type { EmittedController, EmittedJob, EmittedJobRuns, InlinedTypeSection } from './emit.js';
+import { isJobFileName, readJobContract } from './jobReader.js';
+import type { JobContract } from './jobReader.js';
 import { toPosixPath } from './file-system.js';
 import type { FileSystemAdapter } from './file-system.js';
 import { readInlinableTypesFile, selectInlinedTypes } from './typesFileReader.js';
@@ -24,6 +38,15 @@ export interface PlannedController {
     endpointCount: number;
 }
 
+export interface PlannedJob {
+    name: string;
+    filePath: string;
+    /** The stages the job declares, in the order NetSuite calls them. */
+    stages: string[];
+    /** How many deployments a run can be started on: how many runs of the job can overlap. */
+    deploymentCount: number;
+}
+
 export interface PlannedFile {
     /** Absolute path. */
     path: string;
@@ -31,11 +54,12 @@ export interface PlannedFile {
 }
 
 export interface ClientGenerationPlan {
-    /** The modules to write: one per controller, the client index, the scripts map; empty when there are problems. */
+    /** The modules to write: one per controller and per job, the client index, the jobs index, the scripts map; empty when there are problems. */
     files: PlannedFile[];
     /** Generated files in the client's output directory the plan does not write: a removed controller's module, or the copy of the entity types an earlier version made. Absolute paths. */
     leftoverFiles: string[];
     controllers: PlannedController[];
+    jobs: PlannedJob[];
     problems: ControllerProblem[];
 }
 
@@ -56,18 +80,57 @@ function relativeLabel(rootDirectory: string, filePath: string): string {
     return toPosixPath(nodePath.relative(rootDirectory, filePath));
 }
 
-function findDuplicateScriptIds(controllers: EmittedController[]): ControllerProblem[] {
+function findDuplicateScriptIds(controllers: EmittedController[], jobs: EmittedJob[]): ControllerProblem[] {
     const problems: ControllerProblem[] = [];
-    for (const property of ['scriptId', 'deployId'] as const) {
-        const owners = new Map<string, string>();
-        for (const { contract } of controllers) {
-            const id = contract.script[property];
-            const owner = owners.get(id);
-            if (owner !== undefined) problems.push({ filePath: contract.filePath, message: `${property} '${id}' is also declared by ${owner}; every controller is its own script.` });
-            else owners.set(id, contract.filePath);
-        }
+    const scriptOwners = new Map<string, string>();
+    const deployOwners = new Map<string, string>();
+    const claim = (owners: Map<string, string>, id: string, filePath: string, label: string) => {
+        const owner = owners.get(id);
+        if (owner !== undefined) problems.push({ filePath, message: `${label} '${id}' is also declared by ${owner}; every controller and every job is its own script.` });
+        else owners.set(id, filePath);
+    };
+    for (const { contract } of controllers) {
+        claim(scriptOwners, contract.script.scriptId, contract.filePath, 'scriptId');
+        claim(deployOwners, contract.script.deployId, contract.filePath, 'deployId');
+    }
+    for (const { contract } of jobs) {
+        claim(scriptOwners, contract.script.scriptId, contract.filePath, 'scriptId');
+        for (const deployment of contract.script.deployments) claim(deployOwners, deployment, contract.filePath, 'deployment');
     }
     return problems;
+}
+
+/** Every type declaration a shape can be built from: the file's own, then the ones copied into it. */
+function collectDeclarations(own: { name: string; text: string }[], inlinedTypes: InlinedTypeSection[]): Map<string, string> {
+    const declarations = new Map<string, string>();
+    for (const declaration of own) declarations.set(declaration.name, declaration.text);
+    for (const section of inlinedTypes) {
+        for (const declaration of section.declarations) if (!declarations.has(declaration.name)) declarations.set(declaration.name, declaration.text);
+    }
+    return declarations;
+}
+
+/**
+ * A Date reached from a run's input: it is stored as JSON on the run record, so the stage would
+ * receive an ISO string where its annotation promises a Date. The result is not checked, because
+ * nothing reads it back as a Date; the browser sees whatever summarize wrote.
+ */
+function findDatesInJobInput(contract: JobContract, inlinedTypes: InlinedTypeSection[], jobLabel: string): ControllerProblem[] {
+    if (contract.inputType === undefined) return [];
+    const declarations = collectDeclarations(contract.typeDeclarations, inlinedTypes);
+    const visited = new Set<string>();
+    const pending: { name: string; via: string }[] = readReferencedNames(contract.inputType, 'type').map((name) => ({ name, via: contract.inputType as string }));
+    while (pending.length > 0) {
+        const { name, via } = pending.shift() as { name: string; via: string };
+        if (name === 'Date') {
+            return [{ filePath: jobLabel, message: `getInputData takes a Date in its input (through ${via}); a run carries its input as JSON, so take a string and parse it in the stage.` }];
+        }
+        const text = declarations.get(name);
+        if (text === undefined || visited.has(name)) continue;
+        visited.add(name);
+        pending.push(...readReferencedNames(text, 'declaration').map((reference) => ({ name: reference, via: name })));
+    }
+    return [];
 }
 
 /**
@@ -76,11 +139,7 @@ function findDuplicateScriptIds(controllers: EmittedController[]): ControllerPro
  * from a sibling controller is checked where it is declared, as that controller's own request.)
  */
 function findDatesInRequestShapes(contract: ControllerContract, inlinedTypes: InlinedTypeSection[], controllerLabel: string): ControllerProblem[] {
-    const declarations = new Map<string, string>();
-    for (const declaration of contract.typeDeclarations) declarations.set(declaration.name, declaration.text);
-    for (const section of inlinedTypes) {
-        for (const declaration of section.declarations) if (!declarations.has(declaration.name)) declarations.set(declaration.name, declaration.text);
-    }
+    const declarations = collectDeclarations(contract.typeDeclarations, inlinedTypes);
     const problems: ControllerProblem[] = [];
     for (const endpoint of contract.endpoints) {
         if (endpoint.requestType === undefined) continue;
@@ -170,7 +229,44 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
         problems.push(...findDatesInRequestShapes(contract, inlinedTypes, controllerLabel));
         emitted.push({ contract, sourceLabel: controllerLabel, inlinedTypes });
     }
-    problems.push(...findDuplicateScriptIds(emitted));
+    // Jobs: the same reading, with a run instead of a request and a record instead of a reply.
+    const jobsDirectory = resolve(config.jobs);
+    const emittedJobs: EmittedJob[] = [];
+    for (const filePath of fileSystem.listFiles(jobsDirectory)) {
+        const jobLabel = label(filePath);
+        if (!isJobFileName(nodePath.basename(filePath))) {
+            problems.push({ filePath: jobLabel, message: 'a job file is named <name>.ts, with <name> in camelCase; nothing else lives in the jobs folder.' });
+            continue;
+        }
+        const result = readJobContract(jobLabel, fileSystem.readTextFile(filePath), { typeImports: config.typeImports, inlineTypes: config.inlineTypes });
+        problems.push(...result.problems);
+        const contract = result.contract;
+        if (!contract) continue;
+        if (controllerNames.has(contract.name) && jobModuleFileName(contract.name) === controllerModuleFileName(contract.name)) {
+            problems.push({ filePath: jobLabel, message: `a controller is named '${contract.name}' too; their generated modules would be the same file.` });
+        }
+        const inlinedTypes: InlinedTypeSection[] = [];
+        for (const typeImport of contract.inlinedTypeImports) {
+            const file = readInlinable(typeImport.specifier);
+            if (!file || file === 'missing') continue;
+            const selected = selectInlinedTypes(file, typeImport.names, jobLabel, readInlinable);
+            problems.push(...selected.problems);
+            for (const selectedSection of selected.sections) {
+                const section = inlinedTypes.find((existing) => existing.sourceLabel === selectedSection.filePath);
+                if (section) section.declarations.push(...selectedSection.declarations.filter((declaration) => !section.declarations.some((existing) => existing.name === declaration.name)));
+                else inlinedTypes.push({ sourceLabel: selectedSection.filePath, declarations: selectedSection.declarations });
+            }
+        }
+        problems.push(...findDatesInJobInput(contract, inlinedTypes, jobLabel));
+        emittedJobs.push({ contract, sourceLabel: jobLabel, inlinedTypes });
+    }
+    if (emittedJobs.length > 0 && config.jobRuns === undefined) {
+        problems.push({
+            filePath: label(jobsDirectory),
+            message: 'the project has jobs but no run record: add the `jobRuns` block to netsuite-api.config.json (`npm run add:jobs` writes it, with the record itself).',
+        });
+    }
+    problems.push(...findDuplicateScriptIds(emitted, emittedJobs));
 
     const controllers: PlannedController[] = emitted.map(({ contract }) => ({
         name: contract.name,
@@ -179,19 +275,31 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
         browser: contract.script.browser,
         endpointCount: contract.endpoints.length,
     }));
-    if (problems.length > 0) return { files: [], leftoverFiles: [], controllers, problems };
+    const jobs: PlannedJob[] = emittedJobs.map(({ contract }) => ({
+        name: contract.name,
+        filePath: contract.filePath,
+        stages: contract.stages,
+        deploymentCount: contract.script.deployments.length,
+    }));
+    if (problems.length > 0) return { files: [], leftoverFiles: [], controllers, jobs, problems };
 
     const controllersLabel = label(controllersDirectory);
+    const jobsLabel = label(jobsDirectory);
+    const jobRuns: EmittedJobRuns | undefined = config.jobRuns
+        ? { recordType: config.jobRuns.recordType, fields: resolveJobRunFieldIds(config.jobRuns), extraFields: config.jobRuns.extraFields ?? {} }
+        : undefined;
     const files: PlannedFile[] = [
         ...sortControllers(emitted).map((controller) => ({
             path: nodePath.join(outDirectory, controllerModuleFileName(controller.contract.name)),
             content: emitControllerModule(controller, { clientModule: config.clientModule }),
         })),
-        { path: nodePath.join(outDirectory, CLIENT_INDEX_FILE_NAME), content: emitClientIndexModule(emitted, { controllersLabel }) },
-        { path: resolve(config.scriptsOutFile), content: emitScriptsModule(emitted, { wireModule: config.wireModule, controllersLabel }) },
+        ...sortJobs(emittedJobs).map((job) => ({ path: nodePath.join(outDirectory, jobModuleFileName(job.contract.name)), content: emitJobModule(job) })),
+        ...(emittedJobs.length > 0 ? [{ path: nodePath.join(outDirectory, JOBS_INDEX_FILE_NAME), content: emitJobsIndexModule(emittedJobs, { jobsLabel }) }] : []),
+        { path: nodePath.join(outDirectory, CLIENT_INDEX_FILE_NAME), content: emitClientIndexModule(emitted, { controllersLabel, hasJobs: emittedJobs.length > 0 }) },
+        { path: resolve(config.scriptsOutFile), content: emitScriptsModule(emitted, { wireModule: config.wireModule, controllersLabel, jobs: emittedJobs, jobsLabel, jobRuns }) },
     ];
     const leftoverFiles = findLeftoverFiles(fileSystem, outDirectory, files.map((file) => file.path));
-    return { files, leftoverFiles, controllers, problems };
+    return { files, leftoverFiles, controllers, jobs, problems };
 }
 
 export function runClientGeneration(options: GenerateClientOptions): ClientGenerationResult {

@@ -90,3 +90,121 @@ export interface ScriptRef {
     deployId: string;
     browser?: boolean;
 }
+
+/**
+ * Jobs: the Map/Reduce side of the wire. A job answers nothing, so its run is the thing both sides
+ * talk about: server code starts one and gets a run id, and the browser asks what that run is doing.
+ * A run lives in a record of the application's own (`customrecord_<prefix>_job_run`, whose ids the
+ * generator reads from netsuite-api.config.json), so a job that dies before it writes anything is
+ * still a run that failed, not a page waiting forever.
+ */
+
+/** How NetSuite stores a script parameter or a run field, and the type the stages and the page see. */
+export type NetsuiteValueType = 'text' | 'integer' | 'decimal' | 'checkbox' | 'date' | 'select';
+
+/** One script parameter of a job: its id in NetSuite and what NetSuite stores in it. */
+export interface JobParameterDeclaration {
+    id: string;
+    type: NetsuiteValueType;
+}
+
+/** The value of one parameter as the stages see it. A date arrives as the ISO string, never a Date: a stage is not the wire, but a run record is read by both sides. */
+export type JobParameterValue<TType extends NetsuiteValueType> = TType extends 'integer' | 'decimal' ? number : TType extends 'checkbox' ? boolean : string;
+
+/** Every parameter a job declares, by the name the stages use. */
+export type JobParameterValues<TParameters extends Record<string, JobParameterDeclaration>> = {
+    readonly [TName in keyof TParameters]: JobParameterValue<TParameters[TName]['type']>;
+};
+
+/** Where a run is: NetSuite's own stage names, as the run record and the page speak them. */
+export type JobRunStage = 'input' | 'map' | 'shuffle' | 'reduce' | 'summarize';
+
+/**
+ * A run's state. `pending` is submitted but not started, `running` is anything between, and
+ * `complete` means summarize wrote the result. `failed` is either a stage that threw or a task
+ * NetSuite gave up on, which is why a run is read through checkStatus as well as its record.
+ */
+export type JobRunStatus = 'pending' | 'running' | 'complete' | 'failed';
+
+/** One thing that went wrong in a run: a stage's own throw, or a key NetSuite could not finish. */
+export interface JobRunError {
+    stage: JobRunStage;
+    /** The key the map or reduce stage was working on, when the failure belongs to one. */
+    key?: string;
+    message: string;
+}
+
+/**
+ * A run as anyone asking about it sees it: the record's own fields refined by what NetSuite says
+ * about the task. Every time is an ISO string, so this shape crosses to the browser unchanged.
+ */
+export interface JobRun<TResult = unknown, TExtra extends Record<string, unknown> = Record<string, never>> {
+    /** The run record's internal id: what startJob answers and a page polls with. */
+    id: string;
+    /** The job's name, as its declaration gives it. */
+    job: string;
+    status: JobRunStatus;
+    /** The stage the task is in, or null before it starts and after it ends. */
+    stage: JobRunStage | null;
+    /** NetSuite's own estimate, 0 to 100. */
+    percentComplete: number;
+    /** The employee who started it, or null for a scheduled run. */
+    startedBy: number | null;
+    startedAt: string | null;
+    finishedAt: string | null;
+    /** The NetSuite task id, kept so a run can be asked about after the fact. */
+    taskId: string | null;
+    /** What summarize returned, once it has. */
+    result: TResult | null;
+    errors: JobRunError[];
+    /** The fields this application added to the run record, as netsuite-api.config.json declares them. */
+    extra: TExtra;
+}
+
+/** One deployed job as server code starts it: `scripts.<job>` in the generated scripts map. */
+export interface JobRef {
+    kind: 'mapreduce';
+    /** The job's name, as its declaration gives it and the run record records it. */
+    name: string;
+    scriptId: string;
+    /**
+     * Every deployment the job may run on, in the order they are tried. NetSuite runs one instance of
+     * a deployment at a time, so this list is how many runs of the job can overlap.
+     */
+    deployments: readonly string[];
+    /** The script parameter the run id is passed in; every stage reads the run back from it. */
+    runParameter: string;
+    /** The job's own script parameters, by the name the stages use. */
+    parameters?: Readonly<Record<string, string>>;
+}
+
+/** One field an application added to its run record, as netsuite-api.config.json declares it. */
+export interface JobRunExtraField {
+    id: string;
+    type: NetsuiteValueType;
+}
+
+/**
+ * The run record as this application deployed it, written by the generator from the `jobRuns` block
+ * of netsuite-api.config.json. The field names are the package's; their ids are the application's,
+ * because the record carries the application's prefix.
+ */
+export interface JobRunsConfig {
+    recordType: string;
+    fields: {
+        job: string;
+        status: string;
+        stage: string;
+        percentComplete: string;
+        input: string;
+        result: string;
+        errors: string;
+        taskId: string;
+        deployment: string;
+        startedBy: string;
+        startedAt: string;
+        finishedAt: string;
+    };
+    /** Fields this application added, by the name the code uses for them. */
+    extraFields: Readonly<Record<string, JobRunExtraField>>;
+}

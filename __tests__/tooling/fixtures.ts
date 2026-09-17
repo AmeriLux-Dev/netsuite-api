@@ -233,3 +233,63 @@ export const scripts = {
     userRoles: { kind: 'suitelet', scriptId: 'customscript_demo_user_roles', deployId: 'customdeploy_demo_user_roles', browser: false },
 } as const satisfies Record<string, ScriptRef>;
 `;
+
+export const staleOrderServiceSource = `import type { Employee } from '../types/models.gen';
+
+/** A sales order old enough to close, as the service hands it up. */
+export interface StaleOrder {
+    id: number;
+    owner: Pick<Employee, 'id' | 'name'>;
+}
+
+export function listStaleOrders(olderThanDays: number): StaleOrder[] {
+    return olderThanDays > 0 ? [] : [];
+}
+
+export function closeOrder(orderId: number): boolean {
+    return orderId > 0;
+}
+`;
+
+export const closeStaleOrdersJobSource = `/**
+ * @NApiVersion 2.1
+ * @NScriptType MapReduceScript
+ * @NModuleScope SameAccount
+ */
+
+import { defineJob } from '@amerilux/netsuite-api/server';
+import { jobRuns } from '../scripts.gen';
+import { closeOrder, listStaleOrders, type StaleOrder } from '../services/staleOrderService';
+
+/** What a run of this job is asked to do. */
+export interface CloseStaleRequest {
+    olderThanDays: number;
+}
+
+/** What the run leaves behind for the page that started it. */
+export interface CloseStaleResult {
+    closed: number;
+    owners: string[];
+}
+
+export const { getInputData, map, reduce, summarize } = defineJob({
+    name: 'closeStaleOrders',
+    scriptId: 'customscript_demo_close_stale_mr',
+    deployments: ['customdeploy_demo_close_stale_mr', 'customdeploy_demo_close_stale_mr_2'],
+    runParameter: 'custscript_demo_close_stale_run',
+    parameters: { batchSize: { id: 'custscript_demo_close_stale_batch', type: 'integer' } },
+    runs: jobRuns,
+}, {
+    getInputData: (input: CloseStaleRequest): StaleOrder[] => listStaleOrders(input.olderThanDays),
+    map: (order: StaleOrder, job): void => {
+        if (closeOrder(order.id)) job.write(order.owner.name, order.id);
+    },
+    reduce: (owner: string, orderIds: number[], job): void => {
+        job.write(owner, orderIds.length);
+    },
+    summarize: (summary): CloseStaleResult => ({
+        closed: summary.output.reduce((total, entry) => total + entry.value, 0),
+        owners: summary.output.map((entry) => entry.key),
+    }),
+});
+`;

@@ -1,0 +1,208 @@
+import * as nodePath from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { defaultClientGeneratorConfig } from '../../tooling/config.js';
+import type { JobRunsSettings } from '../../tooling/config.js';
+import { createInMemoryFileSystemAdapter } from '../../tooling/file-system.js';
+import { planClientGeneration } from '../../tooling/generate.js';
+import { readJobContract } from '../../tooling/jobReader.js';
+import { closeStaleOrdersJobSource, modelsSource, staleOrderServiceSource, userControllerSource, userRolesControllerSource, userRolesServiceSource } from './fixtures.js';
+
+const projectRoot = nodePath.resolve('/project');
+const apiDirectory = nodePath.join(projectRoot, 'api', 'src');
+const clientDirectory = nodePath.join(projectRoot, 'client', 'src', 'api');
+const jobsDirectory = nodePath.join(apiDirectory, 'jobs');
+const jobModuleFile = nodePath.join(clientDirectory, 'closeStaleOrdersJob.gen.ts');
+const jobsIndexFile = nodePath.join(clientDirectory, 'jobs.gen.ts');
+const indexModuleFile = nodePath.join(clientDirectory, 'index.gen.ts');
+const scriptsModuleFile = nodePath.join(apiDirectory, 'scripts.gen.ts');
+
+const jobRuns: JobRunsSettings = {
+    recordType: 'customrecord_demo_job_run',
+    fieldPrefix: 'custrecord_demo_jr',
+    extraFields: { customerId: { id: 'custrecord_demo_jr_customer', type: 'integer' } },
+};
+
+const readerOptions = { typeImports: defaultClientGeneratorConfig.typeImports, inlineTypes: defaultClientGeneratorConfig.inlineTypes };
+
+function projectFiles(overrides: Record<string, string | undefined> = {}) {
+    const files: Record<string, string | undefined> = {
+        [nodePath.join(apiDirectory, 'types', 'models.gen.ts')]: modelsSource,
+        [nodePath.join(apiDirectory, 'services', 'userRolesService.ts')]: userRolesServiceSource,
+        [nodePath.join(apiDirectory, 'services', 'staleOrderService.ts')]: staleOrderServiceSource,
+        [nodePath.join(apiDirectory, 'controllers', 'userController.ts')]: userControllerSource,
+        [nodePath.join(apiDirectory, 'controllers', 'userRolesController.ts')]: userRolesControllerSource,
+        [nodePath.join(jobsDirectory, 'closeStaleOrders.ts')]: closeStaleOrdersJobSource,
+        ...overrides,
+    };
+    return createInMemoryFileSystemAdapter(Object.fromEntries(Object.entries(files).filter((entry): entry is [string, string] => entry[1] !== undefined)));
+}
+
+function optionsFor(fileSystem: ReturnType<typeof projectFiles>, configOverrides: Partial<typeof defaultClientGeneratorConfig> = {}) {
+    return { config: { ...defaultClientGeneratorConfig, jobRuns, ...configOverrides, rootDirectory: projectRoot }, fileSystem };
+}
+
+/** A job with the given declaration and stages, so one detail at a time can be wrong. */
+function jobSource(declaration: string, stages: string, exported = '{ getInputData, map, summarize }'): string {
+    return `/**
+ * @NScriptType MapReduceScript
+ */
+import { defineJob } from '@amerilux/netsuite-api/server';
+import { jobRuns } from '../scripts.gen';
+
+export const ${exported} = defineJob({${declaration}}, {${stages}});
+`;
+}
+
+const validDeclaration = `
+    name: 'closeStaleOrders',
+    scriptId: 'customscript_demo_close_stale_mr',
+    deployments: ['customdeploy_demo_close_stale_mr'],
+    runParameter: 'custscript_demo_close_stale_run',
+    runs: jobRuns,
+`;
+const validStages = `
+    getInputData: (input: { olderThanDays: number }): number[] => [input.olderThanDays],
+    map: (day: number, job): void => job.write(String(day), day),
+    summarize: (summary): { days: number } => ({ days: summary.output.length }),
+`;
+
+function problemsOf(source: string): string[] {
+    return readJobContract('api/src/jobs/closeStaleOrders.ts', source, readerOptions).problems.map((problem) => problem.message);
+}
+
+describe('readJobContract', () => {
+    it('reads the script, the stages and the shapes on either end of a run', () => {
+        const result = readJobContract('api/src/jobs/closeStaleOrders.ts', closeStaleOrdersJobSource, readerOptions);
+
+        expect(result.problems).toEqual([]);
+        expect(result.contract).toMatchObject({
+            name: 'closeStaleOrders',
+            script: {
+                scriptId: 'customscript_demo_close_stale_mr',
+                deployments: ['customdeploy_demo_close_stale_mr', 'customdeploy_demo_close_stale_mr_2'],
+                runParameter: 'custscript_demo_close_stale_run',
+                parameters: [{ name: 'batchSize', id: 'custscript_demo_close_stale_batch', type: 'integer' }],
+            },
+            inputType: 'CloseStaleRequest',
+            resultType: 'CloseStaleResult',
+            stages: ['getInputData', 'map', 'reduce', 'summarize'],
+            exportedStages: ['getInputData', 'map', 'reduce', 'summarize'],
+        });
+    });
+
+    it('wants the script type in the leading JSDoc', () => {
+        expect(problemsOf(jobSource(validDeclaration, validStages).replace('MapReduceScript', 'Restlet'))).toContainEqual(expect.stringContaining("says '@NScriptType Restlet'"));
+    });
+
+    it('wants the run record the stages read the run through', () => {
+        expect(problemsOf(jobSource(validDeclaration.replace('    runs: jobRuns,\n', ''), validStages))).toContainEqual(expect.stringContaining("needs 'runs: jobRuns'"));
+    });
+
+    it('wants at least one deployment', () => {
+        expect(problemsOf(jobSource(validDeclaration.replace("['customdeploy_demo_close_stale_mr']", '[]'), validStages))).toContainEqual(expect.stringContaining("'deployments' is empty"));
+    });
+
+    it('wants the name to be the file name', () => {
+        expect(problemsOf(jobSource(validDeclaration.replace("'closeStaleOrders'", "'somethingElse'"), validStages))).toContainEqual(expect.stringContaining('the file is closeStaleOrders.ts'));
+    });
+
+    it('wants the input and result annotations it reads the shapes from', () => {
+        expect(problemsOf(jobSource(validDeclaration, validStages.replace(': { olderThanDays: number }', '')))).toContainEqual(expect.stringContaining('getInputData has no type on its first parameter'));
+        expect(problemsOf(jobSource(validDeclaration, validStages.replace(': { days: number }', '')))).toContainEqual(expect.stringContaining('summarize has no return type annotation'));
+    });
+
+    it('wants something for NetSuite to run', () => {
+        const withoutMap = validStages.replace('    map: (day: number, job): void => job.write(String(day), day),\n', '');
+        expect(problemsOf(jobSource(validDeclaration, withoutMap, '{ getInputData, summarize }'))).toContainEqual(expect.stringContaining('declares a map stage, a reduce stage, or both'));
+    });
+
+    it('wants summarize exported, because the run is closed there', () => {
+        expect(problemsOf(jobSource(validDeclaration, validStages, '{ getInputData, map }'))).toContainEqual(expect.stringContaining('every job exports summarize'));
+    });
+
+    it('reports a stage exported without a declaration, and one declared without an export', () => {
+        expect(problemsOf(jobSource(validDeclaration, validStages, '{ getInputData, map, reduce, summarize }'))).toContainEqual(expect.stringContaining("'reduce' is exported but not declared"));
+        expect(problemsOf(jobSource(validDeclaration, validStages, '{ getInputData, summarize }'))).toContainEqual(expect.stringContaining("stage 'map' is declared but not exported"));
+    });
+
+    it('wants the stages exported from the call, the way NetSuite finds them', () => {
+        const assigned = jobSource(validDeclaration, validStages).replace('export const { getInputData, map, summarize } =', 'const job =');
+        expect(problemsOf(assigned)).toContainEqual(expect.stringContaining('the stages are exported from the call'));
+    });
+
+    it('rejects a Date in the input, which a run carries as JSON', () => {
+        const plan = planClientGeneration(
+            optionsFor(projectFiles({ [nodePath.join(jobsDirectory, 'closeStaleOrders.ts')]: jobSource(validDeclaration, validStages.replace('olderThanDays: number', 'olderThan: Date')) })),
+        );
+        expect(plan.problems.map((problem) => problem.message)).toContainEqual(expect.stringContaining('takes a Date in its input'));
+    });
+});
+
+describe('planClientGeneration with jobs', () => {
+    it('plans a module per job, the jobs index, and the run record in the scripts module', () => {
+        const plan = planClientGeneration(optionsFor(projectFiles()));
+
+        expect(plan.problems).toEqual([]);
+        expect(plan.jobs).toEqual([{ name: 'closeStaleOrders', filePath: 'api/src/jobs/closeStaleOrders.ts', stages: ['getInputData', 'map', 'reduce', 'summarize'], deploymentCount: 2 }]);
+        expect(plan.files.map((file) => file.path)).toEqual(expect.arrayContaining([jobModuleFile, jobsIndexFile, indexModuleFile, scriptsModuleFile]));
+    });
+
+    it('writes the job module with its own shapes, the service types it names, and nothing callable', () => {
+        const plan = planClientGeneration(optionsFor(projectFiles()));
+        const module = plan.files.find((file) => file.path === jobModuleFile)?.content ?? '';
+
+        expect(module).toContain('export type Input = CloseStaleRequest;');
+        expect(module).toContain('export type Result = CloseStaleResult;');
+        expect(module).toContain('export interface StaleOrder {');
+        expect(module).toContain('// Types from api/src/services/staleOrderService.ts, copied so this module stands on its own.');
+        expect(module).not.toContain('createApiClient');
+    });
+
+    it('reaches the jobs under `jobs` from the client index', () => {
+        const plan = planClientGeneration(optionsFor(projectFiles()));
+
+        expect(plan.files.find((file) => file.path === jobsIndexFile)?.content).toContain("export * as closeStaleOrders from './closeStaleOrdersJob.gen';");
+        expect(plan.files.find((file) => file.path === indexModuleFile)?.content).toContain("export * as jobs from './jobs.gen';");
+    });
+
+    it('writes the jobs and the run record next to the scripts', () => {
+        const scripts = planClientGeneration(optionsFor(projectFiles())).files.find((file) => file.path === scriptsModuleFile)?.content ?? '';
+
+        expect(scripts).toContain("import type { JobRef, JobRunsConfig, ScriptRef } from '@amerilux/netsuite-api';");
+        expect(scripts).toContain(
+            "    closeStaleOrders: { kind: 'mapreduce', name: 'closeStaleOrders', scriptId: 'customscript_demo_close_stale_mr', deployments: ['customdeploy_demo_close_stale_mr', 'customdeploy_demo_close_stale_mr_2'], runParameter: 'custscript_demo_close_stale_run', parameters: { batchSize: 'custscript_demo_close_stale_batch' } },",
+        );
+        expect(scripts).toContain("recordType: 'customrecord_demo_job_run',");
+        expect(scripts).toContain("status: 'custrecord_demo_jr_status',");
+        expect(scripts).toContain("customerId: { id: 'custrecord_demo_jr_customer', type: 'integer' },");
+        expect(scripts).toContain('} as const satisfies Record<string, JobRef>;');
+    });
+
+    it('leaves the scripts module as it was for a project with no jobs', () => {
+        const withoutJobs = projectFiles({ [nodePath.join(jobsDirectory, 'closeStaleOrders.ts')]: undefined });
+        const scripts = planClientGeneration(optionsFor(withoutJobs, { jobRuns: undefined })).files.find((file) => file.path === scriptsModuleFile)?.content ?? '';
+
+        expect(scripts).toContain("import type { ScriptRef } from '@amerilux/netsuite-api';");
+        expect(scripts).not.toContain('jobs');
+        expect(planClientGeneration(optionsFor(withoutJobs, { jobRuns: undefined })).files.map((file) => file.path)).not.toContain(jobsIndexFile);
+    });
+
+    it('says what is missing when a project has jobs but no run record', () => {
+        const plan = planClientGeneration(optionsFor(projectFiles(), { jobRuns: undefined }));
+
+        expect(plan.problems.map((problem) => problem.message)).toContainEqual(expect.stringContaining('npm run add:jobs'));
+    });
+
+    it('reports a job and a controller claiming the same script id', () => {
+        const clash = closeStaleOrdersJobSource.replace('customscript_demo_close_stale_mr', 'customscript_demo_user');
+        const plan = planClientGeneration(optionsFor(projectFiles({ [nodePath.join(jobsDirectory, 'closeStaleOrders.ts')]: clash })));
+
+        expect(plan.problems.map((problem) => problem.message)).toContainEqual(expect.stringContaining("scriptId 'customscript_demo_user' is also declared by api/src/controllers/userController.ts"));
+    });
+
+    it('rejects anything else in the jobs folder', () => {
+        const plan = planClientGeneration(optionsFor(projectFiles({ [nodePath.join(jobsDirectory, 'CloseHelpers.ts')]: 'export const helper = 1;' })));
+
+        expect(plan.problems.map((problem) => problem.message)).toContainEqual(expect.stringContaining('a job file is named <name>.ts'));
+    });
+});

@@ -114,7 +114,7 @@ export function isControllerFileName(fileName: string): boolean {
     return controllerFileNamePattern.test(fileName);
 }
 
-function hasExportModifier(node: ts.Node): boolean {
+export function hasExportModifier(node: ts.Node): boolean {
     return ts.canHaveModifiers(node) && (ts.getModifiers(node) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
 }
 
@@ -129,17 +129,17 @@ export function readLeadingJsDoc(node: ts.Node, sourceFile: ts.SourceFile): stri
 }
 
 /** The script type NetSuite reads from the leading JSDoc, or undefined. */
-function readScriptTypeHeader(source: string): string | undefined {
+export function readScriptTypeHeader(source: string): string | undefined {
     const header = source.match(/^\s*(\/\*[\s\S]*?\*\/)/)?.[1] ?? '';
     return header.match(/@NScriptType\s+(\w+)/)?.[1];
 }
 
-type ReadTypeImport =
+export type ReadTypeImport =
     | { kind: 'carried'; typeImport: CarriedTypeImport }
     | { kind: 'inlined'; typeImport: InlinedTypeImport }
     | { kind: 'controller'; typeImport: ControllerTypeImport };
 
-function readTypeImport(statement: ts.ImportDeclaration, filePath: string, options: ReadControllerOptions): { read?: ReadTypeImport; problems: ControllerProblem[] } {
+export function readTypeImport(statement: ts.ImportDeclaration, filePath: string, options: ReadControllerOptions): { read?: ReadTypeImport; problems: ControllerProblem[] } {
     const problems: ControllerProblem[] = [];
     const clause = statement.importClause;
     if (!clause || !ts.isStringLiteral(statement.moduleSpecifier)) return { problems };
@@ -219,7 +219,7 @@ function readEndpoint(property: ts.ObjectLiteralElementLike, filePath: string, s
     };
 }
 
-function findCall(statement: ts.VariableStatement, calleeNames: string[]): { declarationName: string; call: ts.CallExpression } | undefined {
+export function findCall(statement: ts.VariableStatement, calleeNames: string[]): { declarationName: string; call: ts.CallExpression } | undefined {
     for (const declaration of statement.declarationList.declarations) {
         if (!ts.isIdentifier(declaration.name)) continue;
         const initializer = declaration.initializer;
@@ -230,7 +230,7 @@ function findCall(statement: ts.VariableStatement, calleeNames: string[]): { dec
     return undefined;
 }
 
-function readStringProperty(literal: ts.ObjectLiteralExpression, propertyName: string): string | undefined {
+export function readStringProperty(literal: ts.ObjectLiteralExpression, propertyName: string): string | undefined {
     for (const property of literal.properties) {
         if (ts.isPropertyAssignment(property) && ts.isIdentifier(property.name) && property.name.text === propertyName && ts.isStringLiteral(property.initializer)) return property.initializer.text;
     }

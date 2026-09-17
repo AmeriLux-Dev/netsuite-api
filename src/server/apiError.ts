@@ -16,4 +16,9 @@ export class ApiError extends Error {
     static forbidden(message = 'Not permitted'): ApiError {
         return new ApiError(403, message);
     }
+
+    /** The request was fine but the account cannot take it now: every deployment of a job is already running. */
+    static conflict(message: string, details?: unknown): ApiError {
+        return new ApiError(409, message, details);
+    }
 }

@@ -18,7 +18,7 @@ export const CLI_USAGE = [
     'Usage: netsuite-api <command> [options]',
     '',
     'Commands:',
-    '  generate        Read the controllers and the app file; write a client module per controller, the client index, the app module and the scripts map, and delete a generated file no controller owns.',
+    '  generate        Read the controllers and the jobs; write a module per controller and per job, the client index, the jobs index and the scripts map, and delete a generated file nothing owns.',
     '  check           Exit non-zero when a generated file is missing, out of date or left over.',
     '  help            Show this message.',
     '',
@@ -42,7 +42,10 @@ function relativeTo(cwd: string, filePath: string): string {
 }
 
 function describeControllers(plan: ClientGenerationPlan): string[] {
-    return plan.controllers.map((controller) => ` - ${controller.name} (${controller.kind}): ${controller.endpointCount} endpoint(s)${controller.browser ? '' : ', types only'}`);
+    return [
+        ...plan.controllers.map((controller) => ` - ${controller.name} (${controller.kind}): ${controller.endpointCount} endpoint(s)${controller.browser ? '' : ', types only'}`),
+        ...plan.jobs.map((job) => ` - ${job.name} (job): ${job.stages.join(', ')}, ${job.deploymentCount} deployment(s)`),
+    ];
 }
 
 /** Runs the CLI and resolves to the process exit code. Never throws for user errors. */
@@ -83,7 +86,9 @@ export function runCli(argv: string[], environment: CliEnvironment): number {
         const result = runClientGeneration(options);
         if (result.problems.length > 0) return failure(result);
         environment.stdout([
-            `netsuite-api: ${result.controllers.length} controller(s), ${result.writtenFiles.length} file(s) written, ${result.unchangedFiles.length} unchanged${result.deletedFiles.length > 0 ? `, ${result.deletedFiles.length} deleted` : ''}.`,
+            `netsuite-api: ${result.controllers.length} controller(s)${result.jobs.length > 0 ? `, ${result.jobs.length} job(s)` : ''}, ${result.writtenFiles.length} file(s) written, ${result.unchangedFiles.length} unchanged${
+                result.deletedFiles.length > 0 ? `, ${result.deletedFiles.length} deleted` : ''
+            }.`,
             ...describeControllers(result),
             ...result.writtenFiles.map((filePath) => ` - wrote ${relativeTo(environment.cwd, filePath)}`),
             ...result.deletedFiles.map((filePath) => ` - deleted ${relativeTo(environment.cwd, filePath)}`),
