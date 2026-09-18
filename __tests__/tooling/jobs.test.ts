@@ -207,7 +207,7 @@ describe('a job whose stages are their own files', () => {
 
         expect(result.problems).toEqual([]);
         expect(result.contract).toMatchObject({ name: 'closeStaleOrders', inputType: 'CloseStaleRequest', resultType: 'CloseStaleResult', stages: ['getInputData', 'map', 'summarize'] });
-        expect(result.contract?.stageFiles.map((stageFile) => stageFile.filePath)).toEqual([
+        expect(result.contract?.folderFiles.map((folderFile) => folderFile.filePath)).toEqual([
             'api/src/jobs/closeStaleOrders/getInputData.ts',
             'api/src/jobs/closeStaleOrders/map.ts',
             'api/src/jobs/closeStaleOrders/summarize.ts',
@@ -244,6 +244,41 @@ export const summarizeFunction = (summary: JobSummary<StaleOrder>): CloseStaleRe
         expect(module).toContain('// Types from api/src/services/staleOrderService.ts, copied so this module stands on its own.');
     });
 
+    it('reads a shape one stage file names from another', () => {
+        // The value a map stage writes is declared where map writes it, and summarize names it again.
+        const crossingShapes = {
+            ...stageShapedJob,
+            [jobFile('closeStaleOrders', 'map.ts')]: `import { closeOrder, type StaleOrder } from '../../services/staleOrderService';
+
+/** What closing one order came to. */
+export interface CloseOutcome {
+    orderId: number;
+    closed: boolean;
+}
+
+export const mapFunction = (order: StaleOrder, job: { write: (key: string, value: CloseOutcome) => void }): void => {
+    job.write(order.owner.name, { orderId: order.id, closed: closeOrder(order.id) });
+};
+`,
+            [jobFile('closeStaleOrders', 'summarize.ts')]: `import type { JobSummary } from '@amerilux/netsuite-api/server';
+import type { CloseOutcome } from './map';
+
+/** What the run leaves behind for the page that started it. */
+export interface CloseStaleResult {
+    closed: CloseOutcome[];
+}
+
+export const summarizeFunction = (summary: JobSummary<CloseOutcome>): CloseStaleResult => ({ closed: summary.output.map((entry) => entry.value) });
+`,
+        };
+        const plan = planClientGeneration(optionsFor(projectFiles(crossingShapes)));
+        const module = plan.files.find((planned) => planned.path === jobModuleFile)?.content ?? '';
+
+        expect(plan.problems).toEqual([]);
+        expect(module).toContain('export type Result = CloseStaleResult;');
+        expect(module).toContain('export interface CloseOutcome {');
+        expect(module).toContain('// Types from api/src/jobs/closeStaleOrders/map.ts, copied so this module stands on its own.');
+    });
     it('says so when a stage names something the definition file does not import', () => {
         const withUnknownStage = { ...stageShapedJob, [jobFile('closeStaleOrders')]: stageShapedJob[jobFile('closeStaleOrders')].replace('map: mapFunction', 'map: mapTheOrders') };
         const problems = planClientGeneration(optionsFor(projectFiles(withUnknownStage))).problems.map((problem) => problem.message);

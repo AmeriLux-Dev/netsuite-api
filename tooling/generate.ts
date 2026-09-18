@@ -281,10 +281,10 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
             problems.push({ filePath: jobLabel, message: `a controller is named '${contract.name}' too; their generated modules would be the same file.` });
         }
         const inlinedTypes: InlinedTypeSection[] = [];
-        // A stage file's own shapes, then whatever it takes from a service: both are the run's, written where its stages are.
-        for (const stageFile of contract.stageFiles) {
-            addDeclarations(inlinedTypes, stageFile.filePath, stageFile.declarations);
-            for (const typeImport of stageFile.inlinedTypeImports) addInlinedTypes(inlinedTypes, typeImport, stageFile.filePath);
+        // What the job's own files declare, then whatever they take from a service: both are the run's shapes.
+        for (const folderFile of contract.folderFiles) {
+            addDeclarations(inlinedTypes, folderFile.filePath, folderFile.declarations);
+            for (const typeImport of folderFile.inlinedTypeImports) addInlinedTypes(inlinedTypes, typeImport, folderFile.filePath);
         }
         for (const typeImport of contract.inlinedTypeImports) addInlinedTypes(inlinedTypes, typeImport, jobLabel);
         problems.push(...findDatesInJobInput(contract, inlinedTypes, jobLabel));

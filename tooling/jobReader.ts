@@ -46,10 +46,11 @@ export interface DeclaredJob {
 }
 
 /**
- * A file a stage was read from: what it declares, and the type imports it carries. Its declarations are
- * copied into the browser's module like a service's, because a run's shapes are written where its stages are.
+ * A file of the job's own folder the reader had to read: a stage, or a file a stage takes a shape from. What
+ * it declares is copied into the browser's module like a service's, because a run's shapes are written where
+ * its stages are — the value a map stage writes is declared in map.ts and named again in summarize.ts.
  */
-export interface JobStageFile {
+export interface JobFolderFile {
     filePath: string;
     declarations: TypeDeclaration[];
     inlinedTypeImports: InlinedTypeImport[];
@@ -81,8 +82,8 @@ export interface JobContract {
     stages: JobStageName[];
     /** The stages the file exports as NetSuite entry points. */
     exportedStages: string[];
-    /** The files the stages were imported from, in the order they were read. */
-    stageFiles: JobStageFile[];
+    /** The files of the job's folder that were read, in that order: its stages, and whatever they name. */
+    folderFiles: JobFolderFile[];
 }
 
 export interface JobReadResult {
@@ -204,7 +205,7 @@ interface FileTypes {
  * The exported type declarations of a file and the type imports it carries, for a job's definition file
  * or for one of its stage files: both end up in the browser's module, so both are read the same way.
  */
-function readFileTypes(sourceFile: ts.SourceFile, filePath: string, options: ReadControllerOptions): FileTypes {
+function readFileTypes(sourceFile: ts.SourceFile, filePath: string, options: ReadControllerOptions, folderFiles?: JobFolderFiles): FileTypes {
     const declarations: TypeDeclaration[] = [];
     const carriedTypeImports: CarriedTypeImport[] = [];
     const inlinedTypeImports: InlinedTypeImport[] = [];
@@ -212,12 +213,17 @@ function readFileTypes(sourceFile: ts.SourceFile, filePath: string, options: Rea
     for (const statement of sourceFile.statements) {
         if (ts.isImportDeclaration(statement)) {
             const result = readTypeImport(statement, filePath, options);
-            problems.push(...result.problems);
             if (result.read?.kind === 'carried') carriedTypeImports.push(result.read.typeImport);
             else if (result.read?.kind === 'inlined') inlinedTypeImports.push(result.read.typeImport);
             else if (result.read?.kind === 'controller') {
                 problems.push({ filePath, message: "a job does not take types from a controller; its input and result are its own, or a service's." });
+            } else if (result.problems.length > 0 && ts.isStringLiteral(statement.moduleSpecifier) && isRelativeSpecifier(statement.moduleSpecifier.text)) {
+                // A shape another file of this job's folder declares: read there instead of reported as unreachable.
+                const sibling = folderFiles?.read(statement.moduleSpecifier.text);
+                if (!sibling) problems.push(...result.problems);
+                continue;
             }
+            problems.push(...result.problems);
             continue;
         }
         if (!ts.isInterfaceDeclaration(statement) && !ts.isTypeAliasDeclaration(statement) && !ts.isEnumDeclaration(statement)) continue;
@@ -233,6 +239,46 @@ function readFileTypes(sourceFile: ts.SourceFile, filePath: string, options: Rea
         declarations.push({ name: statement.name.text, text: `${jsDoc ? `${jsDoc}\n` : ''}${statement.getText(sourceFile)}` });
     }
     return { declarations, carriedTypeImports, inlinedTypeImports, problems };
+}
+
+function isRelativeSpecifier(specifier: string): boolean {
+    return specifier.startsWith('./') || specifier.startsWith('../');
+}
+
+/**
+ * The files of one job's folder, read once each however many stages and shapes come from them. A file is
+ * registered before its own types are read, so two stage files naming each other's shapes stop there.
+ */
+interface JobFolderFiles {
+    read(specifier: string): { sourceFile: ts.SourceFile; filePath: string } | undefined;
+    readonly collected: JobFolderFile[];
+    readonly problems: ControllerProblem[];
+}
+
+function createJobFolderFiles(options: ReadJobOptions): JobFolderFiles {
+    const collected: JobFolderFile[] = [];
+    const problems: ControllerProblem[] = [];
+    const bySpecifier = new Map<string, { sourceFile: ts.SourceFile; filePath: string } | undefined>();
+    const folderFiles: JobFolderFiles = {
+        collected,
+        problems,
+        read(specifier) {
+            if (bySpecifier.has(specifier)) return bySpecifier.get(specifier);
+            const read = options.readStageFile?.(specifier);
+            if (!read) {
+                bySpecifier.set(specifier, undefined);
+                return undefined;
+            }
+            const sourceFile = ts.createSourceFile(read.filePath, read.source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+            const entry = { sourceFile, filePath: read.filePath };
+            bySpecifier.set(specifier, entry);
+            const types = readFileTypes(sourceFile, read.filePath, options, folderFiles);
+            problems.push(...types.problems);
+            collected.push({ filePath: read.filePath, declarations: types.declarations, inlinedTypeImports: types.inlinedTypeImports, carriedTypeImports: types.carriedTypeImports });
+            return entry;
+        },
+    };
+    return folderFiles;
 }
 
 /** `import { mapFunction } from './map'`: every value imported by name, by the name this file calls it. */
@@ -270,33 +316,15 @@ interface ReadStagesResult {
     stages: JobStageName[];
     inputType?: string;
     resultType?: string;
-    stageFiles: JobStageFile[];
     problems: ControllerProblem[];
 }
 
-function readStages(literal: ts.ObjectLiteralExpression, filePath: string, sourceFile: ts.SourceFile, options: ReadJobOptions): ReadStagesResult {
+function readStages(literal: ts.ObjectLiteralExpression, filePath: string, sourceFile: ts.SourceFile, folderFiles: JobFolderFiles): ReadStagesResult {
     const problems: ControllerProblem[] = [];
     const stages: JobStageName[] = [];
-    const stageFiles: JobStageFile[] = [];
     const valueImports = readValueImports(sourceFile);
-    const filesBySpecifier = new Map<string, { sourceFile: ts.SourceFile; filePath: string }>();
     let inputType: string | undefined;
     let resultType: string | undefined;
-
-    /** A stage file, read once however many stages come from it, and its shapes collected as it is read. */
-    function readStageFile(specifier: string): { sourceFile: ts.SourceFile; filePath: string } | undefined {
-        const alreadyRead = filesBySpecifier.get(specifier);
-        if (alreadyRead) return alreadyRead;
-        const read = options.readStageFile?.(specifier);
-        if (!read) return undefined;
-        const stageSourceFile = ts.createSourceFile(read.filePath, read.source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-        const types = readFileTypes(stageSourceFile, read.filePath, options);
-        problems.push(...types.problems);
-        stageFiles.push({ filePath: read.filePath, declarations: types.declarations, inlinedTypeImports: types.inlinedTypeImports, carriedTypeImports: types.carriedTypeImports });
-        const entry = { sourceFile: stageSourceFile, filePath: read.filePath };
-        filesBySpecifier.set(specifier, entry);
-        return entry;
-    }
 
     /** The function a stage names, in the file it is imported from: `getInputData: getInputDataFunction`. */
     function findReferencedStage(stageName: string, referenced: string): { handler: StageHandler; sourceFile: ts.SourceFile; filePath: string } | undefined {
@@ -309,7 +337,7 @@ function readStages(literal: ts.ObjectLiteralExpression, filePath: string, sourc
             problems.push({ filePath, message: `stage '${stageName}' comes from '${imported.specifier}'; a stage is imported from a file beside the job, such as './${stageName}'.` });
             return undefined;
         }
-        const stageFile = readStageFile(imported.specifier);
+        const stageFile = folderFiles.read(imported.specifier);
         if (!stageFile) {
             problems.push({ filePath, message: `stage '${stageName}' is imported from '${imported.specifier}', which is not a file beside the job the generator can read.` });
             return undefined;
@@ -365,7 +393,7 @@ function readStages(literal: ts.ObjectLiteralExpression, filePath: string, sourc
     if (!stages.includes('map') && !stages.includes('reduce')) {
         problems.push({ filePath, message: 'a job declares a map stage, a reduce stage, or both; NetSuite has nothing to run otherwise.' });
     }
-    return { stages, inputType, resultType, stageFiles, problems };
+    return { stages, inputType, resultType, problems };
 }
 
 export function readJobContract(filePath: string, source: string, options: ReadJobOptions): JobReadResult {
@@ -386,7 +414,8 @@ export function readJobContract(filePath: string, source: string, options: ReadJ
         problems.push({ filePath, message: `the leading JSDoc says '@NScriptType ${header ?? '(none)'}'; a job is a ${JOB_SCRIPT_TYPE_HEADER}.` });
     }
 
-    const fileTypes = readFileTypes(sourceFile, filePath, options);
+    const folderFiles = createJobFolderFiles(options);
+    const fileTypes = readFileTypes(sourceFile, filePath, options, folderFiles);
     problems.push(...fileTypes.problems);
     const { carriedTypeImports, inlinedTypeImports, declarations: typeDeclarations } = fileTypes;
     let contract: Omit<JobContract, 'carriedTypeImports' | 'inlinedTypeImports' | 'typeDeclarations'> | undefined;
@@ -413,7 +442,7 @@ export function readJobContract(filePath: string, source: string, options: ReadJ
         }
         const declared = readJobDeclaration(declarationArgument, name, filePath);
         problems.push(...declared.problems);
-        const stages = readStages(stagesArgument, filePath, sourceFile, options);
+        const stages = readStages(stagesArgument, filePath, sourceFile, folderFiles);
         problems.push(...stages.problems);
         for (const exported of found.exportedStages) {
             if (!JOB_STAGE_NAMES.includes(exported as JobStageName)) {
@@ -440,10 +469,11 @@ export function readJobContract(filePath: string, source: string, options: ReadJ
             resultType: stages.resultType,
             stages: stages.stages,
             exportedStages: found.exportedStages,
-            stageFiles: stages.stageFiles,
+            folderFiles: folderFiles.collected,
         };
     }
 
+    problems.push(...folderFiles.problems);
     if (!contract) {
         if (problems.length === 0) {
             problems.push({ filePath, message: 'must declare its script: `export const { getInputData, map, summarize } = defineJob({ name, scriptId, deployments, runParameter, runs }, { ... })`.' });
