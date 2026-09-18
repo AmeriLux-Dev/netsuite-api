@@ -258,8 +258,8 @@ export const closeStaleOrdersJobSource = `/**
  */
 
 import { defineJob } from '@amerilux/netsuite-api/server';
-import { jobRuns } from '../scripts.gen';
-import { closeOrder, listStaleOrders, type StaleOrder } from '../services/staleOrderService';
+import { jobRuns } from '../../scripts.gen';
+import { closeOrder, listStaleOrders, type StaleOrder } from '../../services/staleOrderService';
 
 /** What a run of this job is asked to do. */
 export interface CloseStaleRequest {

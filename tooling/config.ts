@@ -107,7 +107,13 @@ export const defaultClientGeneratorConfig: ClientGeneratorConfig = {
     clientModule: '@amerilux/netsuite-api/client',
     wireModule: '@amerilux/netsuite-api',
     typeImports: { '@amerilux/netsuite-api/server': '@amerilux/netsuite-api/client' },
-    inlineTypes: { '../types/models.gen': 'api/src/types/models.gen.ts', '../services/*': 'api/src/services/*.ts' },
+    inlineTypes: {
+        '../types/models.gen': 'api/src/types/models.gen.ts',
+        '../services/*': 'api/src/services/*.ts',
+        // A job is a folder, so its definition and its stage files name the same places from one level deeper.
+        '../../types/models.gen': 'api/src/types/models.gen.ts',
+        '../../services/*': 'api/src/services/*.ts',
+    },
 };
 
 const wildcardInlineTypesKeyPattern = /^([^*]*)\*([^*]*)$/;

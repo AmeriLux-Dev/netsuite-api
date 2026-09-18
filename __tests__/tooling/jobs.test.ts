@@ -11,6 +11,9 @@ const projectRoot = nodePath.resolve('/project');
 const apiDirectory = nodePath.join(projectRoot, 'api', 'src');
 const clientDirectory = nodePath.join(projectRoot, 'client', 'src', 'api');
 const jobsDirectory = nodePath.join(apiDirectory, 'jobs');
+/** A job is a folder of its own name: api/src/jobs/<name>/<name>.ts declares it, its stage files sit beside it. */
+const jobFile = (jobName: string, fileName = `${jobName}.ts`) => nodePath.join(jobsDirectory, jobName, fileName);
+const closeStaleOrdersLabel = 'api/src/jobs/closeStaleOrders/closeStaleOrders.ts';
 const jobModuleFile = nodePath.join(clientDirectory, 'closeStaleOrdersJob.gen.ts');
 const jobsIndexFile = nodePath.join(clientDirectory, 'jobs.gen.ts');
 const indexModuleFile = nodePath.join(clientDirectory, 'index.gen.ts');
@@ -31,7 +34,7 @@ function projectFiles(overrides: Record<string, string | undefined> = {}) {
         [nodePath.join(apiDirectory, 'services', 'staleOrderService.ts')]: staleOrderServiceSource,
         [nodePath.join(apiDirectory, 'controllers', 'userController.ts')]: userControllerSource,
         [nodePath.join(apiDirectory, 'controllers', 'userRolesController.ts')]: userRolesControllerSource,
-        [nodePath.join(jobsDirectory, 'closeStaleOrders.ts')]: closeStaleOrdersJobSource,
+        [jobFile('closeStaleOrders')]: closeStaleOrdersJobSource,
         ...overrides,
     };
     return createInMemoryFileSystemAdapter(Object.fromEntries(Object.entries(files).filter((entry): entry is [string, string] => entry[1] !== undefined)));
@@ -67,12 +70,12 @@ const validStages = `
 `;
 
 function problemsOf(source: string): string[] {
-    return readJobContract('api/src/jobs/closeStaleOrders.ts', source, readerOptions).problems.map((problem) => problem.message);
+    return readJobContract(closeStaleOrdersLabel, source, readerOptions).problems.map((problem) => problem.message);
 }
 
 describe('readJobContract', () => {
     it('reads the script, the stages and the shapes on either end of a run', () => {
-        const result = readJobContract('api/src/jobs/closeStaleOrders.ts', closeStaleOrdersJobSource, readerOptions);
+        const result = readJobContract(closeStaleOrdersLabel, closeStaleOrdersJobSource, readerOptions);
 
         expect(result.problems).toEqual([]);
         expect(result.contract).toMatchObject({
@@ -103,7 +106,7 @@ describe('readJobContract', () => {
     });
 
     it('wants the name to be the file name', () => {
-        expect(problemsOf(jobSource(validDeclaration.replace("'closeStaleOrders'", "'somethingElse'"), validStages))).toContainEqual(expect.stringContaining('the file is closeStaleOrders.ts'));
+        expect(problemsOf(jobSource(validDeclaration.replace("'closeStaleOrders'", "'somethingElse'"), validStages))).toContainEqual(expect.stringContaining("the job is closeStaleOrders"));
     });
 
     it('wants the input and result annotations it reads the shapes from', () => {
@@ -132,9 +135,155 @@ describe('readJobContract', () => {
 
     it('rejects a Date in the input, which a run carries as JSON', () => {
         const plan = planClientGeneration(
-            optionsFor(projectFiles({ [nodePath.join(jobsDirectory, 'closeStaleOrders.ts')]: jobSource(validDeclaration, validStages.replace('olderThanDays: number', 'olderThan: Date')) })),
+            optionsFor(projectFiles({ [jobFile('closeStaleOrders')]: jobSource(validDeclaration, validStages.replace('olderThanDays: number', 'olderThan: Date')) })),
         );
         expect(plan.problems.map((problem) => problem.message)).toContainEqual(expect.stringContaining('takes a Date in its input'));
+    });
+});
+
+/**
+ * A job in the shape a developer reads stage by stage: the definition file declares the script and wires
+ * four names, and each stage's own file carries the work and the shapes on its own boundary.
+ */
+const stageShapedJob = {
+    [jobFile('closeStaleOrders')]: `/**
+ * @NScriptType MapReduceScript
+ */
+
+import { defineJob } from '@amerilux/netsuite-api/server';
+import { jobRuns } from '../../scripts.gen';
+import { getInputDataFunction } from './getInputData';
+import { mapFunction } from './map';
+import { summarizeFunction } from './summarize';
+
+export const { getInputData, map, summarize } = defineJob({
+    name: 'closeStaleOrders',
+    scriptId: 'customscript_demo_close_stale_mr',
+    deployments: ['customdeploy_demo_close_stale_mr', 'customdeploy_demo_close_stale_mr_2'],
+    runParameter: 'custscript_demo_close_stale_run',
+    runs: jobRuns,
+}, {
+    getInputData: getInputDataFunction,
+    map: mapFunction,
+    summarize: summarizeFunction,
+});
+`,
+    [jobFile('closeStaleOrders', 'getInputData.ts')]: `import { listStaleOrders, type StaleOrder } from '../../services/staleOrderService';
+
+/** What a run of this job is asked to do. */
+export interface CloseStaleRequest {
+    olderThanDays: number;
+}
+
+export const getInputDataFunction = (input: CloseStaleRequest): StaleOrder[] => listStaleOrders(input.olderThanDays);
+`,
+    [jobFile('closeStaleOrders', 'map.ts')]: `import { closeOrder, type StaleOrder } from '../../services/staleOrderService';
+
+export const mapFunction = (order: StaleOrder, job: { write: (key: string, value: number) => void }): void => {
+    if (closeOrder(order.id)) job.write(order.owner.name, order.id);
+};
+`,
+    [jobFile('closeStaleOrders', 'summarize.ts')]: `import type { JobSummary } from '@amerilux/netsuite-api/server';
+
+/** What the run leaves behind for the page that started it. */
+export interface CloseStaleResult {
+    closed: number;
+}
+
+export const summarizeFunction = (summary: JobSummary<number>): CloseStaleResult => ({ closed: summary.output.length });
+`,
+};
+
+describe('a job whose stages are their own files', () => {
+    it('reads the run\'s shapes from the stage that names them', () => {
+        const result = readJobContract(closeStaleOrdersLabel, stageShapedJob[jobFile('closeStaleOrders')], {
+            ...readerOptions,
+            readStageFile: (specifier) => {
+                const fileName = `${specifier.replace('./', '')}.ts`;
+                const source = stageShapedJob[jobFile('closeStaleOrders', fileName)];
+                return source === undefined ? undefined : { filePath: `api/src/jobs/closeStaleOrders/${fileName}`, source };
+            },
+        });
+
+        expect(result.problems).toEqual([]);
+        expect(result.contract).toMatchObject({ name: 'closeStaleOrders', inputType: 'CloseStaleRequest', resultType: 'CloseStaleResult', stages: ['getInputData', 'map', 'summarize'] });
+        expect(result.contract?.stageFiles.map((stageFile) => stageFile.filePath)).toEqual([
+            'api/src/jobs/closeStaleOrders/getInputData.ts',
+            'api/src/jobs/closeStaleOrders/map.ts',
+            'api/src/jobs/closeStaleOrders/summarize.ts',
+        ]);
+    });
+
+    it('copies the result\'s shape out of the stage file that declares it, and says where it came from', () => {
+        const module = planClientGeneration(optionsFor(projectFiles(stageShapedJob))).files.find((planned) => planned.path === jobModuleFile)?.content ?? '';
+
+        expect(module).toContain('export type Result = CloseStaleResult;');
+        expect(module).toContain('export interface CloseStaleResult {');
+        expect(module).toContain('// Types from api/src/jobs/closeStaleOrders/summarize.ts, copied so this module stands on its own.');
+        // JobSummary is the package's own, server-side: the result does not name it, so it is not carried over.
+        expect(module).not.toContain('JobSummary');
+    });
+
+    it('carries a service type the result names through the stage file that imports it', () => {
+        const resultNamingStaleOrder = {
+            ...stageShapedJob,
+            [jobFile('closeStaleOrders', 'summarize.ts')]: `import type { JobSummary } from '@amerilux/netsuite-api/server';
+import type { StaleOrder } from '../../services/staleOrderService';
+
+export interface CloseStaleResult {
+    closed: number;
+    oldest: StaleOrder;
+}
+
+export const summarizeFunction = (summary: JobSummary<StaleOrder>): CloseStaleResult => ({ closed: summary.output.length, oldest: summary.output[0].value });
+`,
+        };
+        const module = planClientGeneration(optionsFor(projectFiles(resultNamingStaleOrder))).files.find((planned) => planned.path === jobModuleFile)?.content ?? '';
+
+        expect(module).toContain('export interface StaleOrder {');
+        expect(module).toContain('// Types from api/src/services/staleOrderService.ts, copied so this module stands on its own.');
+    });
+
+    it('says so when a stage names something the definition file does not import', () => {
+        const withUnknownStage = { ...stageShapedJob, [jobFile('closeStaleOrders')]: stageShapedJob[jobFile('closeStaleOrders')].replace('map: mapFunction', 'map: mapTheOrders') };
+        const problems = planClientGeneration(optionsFor(projectFiles(withUnknownStage))).problems.map((problem) => problem.message);
+
+        expect(problems).toContainEqual(expect.stringContaining("stage 'map' names 'mapTheOrders', which this file does not import"));
+    });
+
+    it('says so when a stage is imported from somewhere that is not a file beside the job', () => {
+        const fromPackage = {
+            ...stageShapedJob,
+            [jobFile('closeStaleOrders')]: stageShapedJob[jobFile('closeStaleOrders')].replace("import { mapFunction } from './map';", "import { mapFunction } from '@amerilux/netsuite-api/server';"),
+        };
+        const problems = planClientGeneration(optionsFor(projectFiles(fromPackage))).problems.map((problem) => problem.message);
+
+        expect(problems).toContainEqual(expect.stringContaining("stage 'map' comes from '@amerilux/netsuite-api/server'"));
+    });
+
+    it('says so when the stage file is not there', () => {
+        const withoutMapFile = { ...stageShapedJob, [jobFile('closeStaleOrders', 'map.ts')]: undefined };
+        const problems = planClientGeneration(optionsFor(projectFiles(withoutMapFile))).problems.map((problem) => problem.message);
+
+        expect(problems).toContainEqual(expect.stringContaining("stage 'map' is imported from './map', which is not a file beside the job"));
+    });
+
+    it('says so when the name a stage imports is not an exported function', () => {
+        const notAFunction = { ...stageShapedJob, [jobFile('closeStaleOrders', 'map.ts')]: 'export const mapFunction = 7;\n' };
+        const problems = planClientGeneration(optionsFor(projectFiles(notAFunction))).problems.map((problem) => problem.message);
+
+        expect(problems).toContainEqual(expect.stringContaining("'mapFunction' is not exported from here as a function"));
+    });
+
+    it('reads an annotation the stage file leaves off as missing, pointing at that file', () => {
+        const withoutReturnType = {
+            ...stageShapedJob,
+            [jobFile('closeStaleOrders', 'summarize.ts')]: stageShapedJob[jobFile('closeStaleOrders', 'summarize.ts')].replace('): CloseStaleResult =>', ') =>'),
+        };
+        const problems = planClientGeneration(optionsFor(projectFiles(withoutReturnType))).problems;
+
+        expect(problems.map((problem) => problem.message)).toContainEqual(expect.stringContaining('summarize has no return type annotation'));
+        expect(problems.map((problem) => problem.filePath)).toContainEqual('api/src/jobs/closeStaleOrders/summarize.ts');
     });
 });
 
@@ -143,7 +292,7 @@ describe('planClientGeneration with jobs', () => {
         const plan = planClientGeneration(optionsFor(projectFiles()));
 
         expect(plan.problems).toEqual([]);
-        expect(plan.jobs).toEqual([{ name: 'closeStaleOrders', filePath: 'api/src/jobs/closeStaleOrders.ts', stages: ['getInputData', 'map', 'reduce', 'summarize'], deploymentCount: 2 }]);
+        expect(plan.jobs).toEqual([{ name: 'closeStaleOrders', filePath: closeStaleOrdersLabel, stages: ['getInputData', 'map', 'reduce', 'summarize'], deploymentCount: 2 }]);
         expect(plan.files.map((file) => file.path)).toEqual(expect.arrayContaining([jobModuleFile, jobsIndexFile, indexModuleFile, scriptsModuleFile]));
     });
 
@@ -163,7 +312,7 @@ describe('planClientGeneration with jobs', () => {
     it('copies a service type the result names, and says where it came from', () => {
         const resultNamingStaleOrder = closeStaleOrdersJobSource.replace('    owners: string[];', '    sample: StaleOrder;').replace('owners: summary.output.map((entry) => entry.key),', 'sample: listStaleOrders(1)[0],');
         const module =
-            planClientGeneration(optionsFor(projectFiles({ [nodePath.join(jobsDirectory, 'closeStaleOrders.ts')]: resultNamingStaleOrder })))
+            planClientGeneration(optionsFor(projectFiles({ [jobFile('closeStaleOrders')]: resultNamingStaleOrder })))
                 .files.find((file) => file.path === jobModuleFile)?.content ?? '';
 
         expect(module).toContain('export interface StaleOrder {');
@@ -175,7 +324,7 @@ describe('planClientGeneration with jobs', () => {
         const returningVoid = jobSource(validDeclaration, validStages.replace(': { days: number } => ({ days: summary.output.length })', ': void => undefined'));
 
         for (const source of [withoutSummarize, returningVoid]) {
-            const module = planClientGeneration(optionsFor(projectFiles({ [nodePath.join(jobsDirectory, 'closeStaleOrders.ts')]: source })))
+            const module = planClientGeneration(optionsFor(projectFiles({ [jobFile('closeStaleOrders')]: source })))
                 .files.find((file) => file.path === nodePath.join(clientDirectory, 'closeStaleOrdersJob.gen.ts'))?.content ?? '';
             expect(module).toContain('export type Result = null;');
         }
@@ -202,7 +351,7 @@ describe('planClientGeneration with jobs', () => {
     });
 
     it('leaves the scripts module as it was for a project with no jobs', () => {
-        const withoutJobs = projectFiles({ [nodePath.join(jobsDirectory, 'closeStaleOrders.ts')]: undefined });
+        const withoutJobs = projectFiles({ [jobFile('closeStaleOrders')]: undefined });
         const scripts = planClientGeneration(optionsFor(withoutJobs, { jobRuns: undefined })).files.find((file) => file.path === scriptsModuleFile)?.content ?? '';
 
         expect(scripts).toContain("import type { ScriptRef } from '@amerilux/netsuite-api';");
@@ -218,14 +367,20 @@ describe('planClientGeneration with jobs', () => {
 
     it('reports a job and a controller claiming the same script id', () => {
         const clash = closeStaleOrdersJobSource.replace('customscript_demo_close_stale_mr', 'customscript_demo_user');
-        const plan = planClientGeneration(optionsFor(projectFiles({ [nodePath.join(jobsDirectory, 'closeStaleOrders.ts')]: clash })));
+        const plan = planClientGeneration(optionsFor(projectFiles({ [jobFile('closeStaleOrders')]: clash })));
 
         expect(plan.problems.map((problem) => problem.message)).toContainEqual(expect.stringContaining("scriptId 'customscript_demo_user' is also declared by api/src/controllers/userController.ts"));
     });
 
-    it('rejects anything else in the jobs folder', () => {
-        const plan = planClientGeneration(optionsFor(projectFiles({ [nodePath.join(jobsDirectory, 'CloseHelpers.ts')]: 'export const helper = 1;' })));
+    it('rejects a file sitting in the jobs folder itself', () => {
+        const plan = planClientGeneration(optionsFor(projectFiles({ [nodePath.join(jobsDirectory, 'closeHelpers.ts')]: 'export const helper = 1;' })));
 
-        expect(plan.problems.map((problem) => problem.message)).toContainEqual(expect.stringContaining('a job file is named <name>.ts'));
+        expect(plan.problems.map((problem) => problem.message)).toContainEqual(expect.stringContaining('a job lives in a folder of its own'));
+    });
+
+    it('says what is missing when a job folder has no file of its own name', () => {
+        const plan = planClientGeneration(optionsFor(projectFiles({ [jobFile('closeStaleOrders')]: undefined, [jobFile('closeStaleOrders', 'map.ts')]: 'export const mapFunction = (): void => undefined;' })));
+
+        expect(plan.problems.map((problem) => problem.message)).toContainEqual(expect.stringContaining('there is no closeStaleOrders.ts here'));
     });
 });

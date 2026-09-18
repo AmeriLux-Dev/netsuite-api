@@ -121,11 +121,16 @@ A hook imports `{ customer }` from it, calls `customer.api.search({ search: 'acm
   "clientModule": "@amerilux/netsuite-api/client",
   "wireModule": "@amerilux/netsuite-api",
   "typeImports": { "@amerilux/netsuite-api/server": "@amerilux/netsuite-api/client" },
-  "inlineTypes": { "../types/models.gen": "api/src/types/models.gen.ts", "../services/*": "api/src/services/*.ts" }
+  "inlineTypes": {
+    "../types/models.gen": "api/src/types/models.gen.ts",
+    "../services/*": "api/src/services/*.ts",
+    "../../types/models.gen": "api/src/types/models.gen.ts",
+    "../../services/*": "api/src/services/*.ts"
+  }
 }
 ```
 
-Paths are relative to the config file. `outDir` holds the controller and job modules and their indexes, and nothing else. A project with jobs adds a `jobRuns` block naming the run record it deployed; see **Jobs**. `inlineTypes` maps a specifier as written in a controller to the file whose type declarations are copied into the module of every controller importing from it; a key with one `*` stands for a file name and the `*` in its file takes that name, so `../services/*` covers every service. Only the type declarations of a file are read, so a service's functions are skipped; a type in one inlined file that refers to a type imported from another (a service's summary type built on an entity type) brings that type along, the import resolved through the same map as written from the same folder depth. `typeImports` maps a specifier to the one the client resolves, for a type that stays an import (the package's server entry maps to its client entry so `RawResponse` carries over). A type imported from any other module is an error.
+Paths are relative to the config file. `outDir` holds the controller and job modules and their indexes, and nothing else. A project with jobs adds a `jobRuns` block naming the run record it deployed; see **Jobs**. `inlineTypes` maps a specifier as written in a controller to the file whose type declarations are copied into the module of every controller importing from it; a key with one `*` stands for a file name and the `*` in its file takes that name, so `../services/*` covers every service. Only the type declarations of a file are read, so a service's functions are skipped; a type in one inlined file that refers to a type imported from another (a service's summary type built on an entity type) brings that type along, the import resolved through the same map as written from the same folder depth. The `../../` entries are the same two files named from one folder deeper, because a job is a folder and its stage files sit inside it. `typeImports` maps a specifier to the one the client resolves, for a type that stays an import (the package's server entry maps to its client entry so `RawResponse` carries over). A type imported from any other module is an error.
 
 ## The client at runtime
 
@@ -195,19 +200,21 @@ export const listRolesForEmployee = (employeeId: number) => userRolesApi.byEmplo
 
 ## Jobs
 
-A job is a Map/Reduce script written as stages. What the wrapper adds is the run: a Map/Reduce answers nothing and cannot be waited on, so every run is a row in a record of the application's own, and that row is what server code and the browser talk about.
+A job is a Map/Reduce script written as stages, and it is a folder: `api/src/jobs/<name>/<name>.ts` declares it and the stages it is made of sit beside it, one file each. What the wrapper adds is the run: a Map/Reduce answers nothing and cannot be waited on, so every run is a row in a record of the application's own, and that row is what server code and the browser talk about.
+
+The definition file is a declaration and a wiring, so what a job is reads at a glance: its ids, its deployments, its parameters, and which stages it has.
 
 ```ts
+// api/src/jobs/closeStaleOrders/closeStaleOrders.ts
 /**
  * @NApiVersion 2.1
  * @NScriptType MapReduceScript
  */
 import { defineJob } from '@amerilux/netsuite-api/server';
-import { jobRuns } from '../scripts.gen';
-import { closeOrder, listStaleOrders, type StaleOrder } from '../services/staleOrderService';
-
-export interface CloseStaleRequest { olderThanDays: number }
-export interface CloseStaleResult { closed: number }
+import { jobRuns } from '../../scripts.gen';
+import { getInputDataFunction } from './getInputData';
+import { mapFunction } from './map';
+import { summarizeFunction } from './summarize';
 
 export const { getInputData, map, summarize } = defineJob({
     name: 'closeStaleOrders',
@@ -217,21 +224,33 @@ export const { getInputData, map, summarize } = defineJob({
     parameters: { batchSize: { id: 'custscript_app_close_stale_batch', type: 'integer' } },
     runs: jobRuns,
 }, {
-    getInputData: (input: CloseStaleRequest): StaleOrder[] => listStaleOrders(input.olderThanDays),
-    map: (order: StaleOrder, job): void => {
-        if (closeOrder(order.id)) job.write(String(order.id), order.id);
-    },
-    summarize: (summary): CloseStaleResult => ({ closed: summary.output.length }),
+    getInputData: getInputDataFunction,
+    map: mapFunction,
+    summarize: summarizeFunction,
 });
 ```
 
-The first parameter of `getInputData` is the run's input and the return type of `summarize` is its result: the generator reads the shapes from those two annotations, the way it reads an endpoint's request and response. The values carried between stages are JSON, so each stage annotates what it expects (`values: number[]` on a reduce stage, `summary: JobSummary<Total>` on summarize) and the wrapper hands them back that way. Export the stages the job has, and `summarize` always: the run is closed there. A stage exported without being declared throws when NetSuite calls it, rather than quietly passing values through.
+Each stage is then a file named after the stage NetSuite calls, holding the work and the shapes on its own boundary — open map.ts to see what the map stage does:
+
+```ts
+// api/src/jobs/closeStaleOrders/getInputData.ts
+import { listStaleOrders, type StaleOrder } from '../../services/staleOrderService';
+
+/** What a run of this job is asked to do. */
+export interface CloseStaleRequest { olderThanDays: number }
+
+export const getInputDataFunction = (input: CloseStaleRequest): StaleOrder[] => listStaleOrders(input.olderThanDays);
+```
+
+A stage file exports the stage's name plus `Function`, because the definition file exports the plain names NetSuite looks for and the two would collide. A stage may also be written inline in the definition file, which suits a job whose stages are a line each — the cleanup job `npm run add:jobs` writes is one.
+
+The first parameter of `getInputData` is the run's input and the return type of `summarize` is its result: the generator reads the shapes from those two annotations wherever the stage is written, the way it reads an endpoint's request and response, and copies the shapes the result names into the browser's module whether the stage file declares them or takes them from a service. The values carried between stages are JSON, so each stage annotates what it expects (`values: number[]` on a reduce stage, `summary: JobSummary<Total>` on summarize) and the wrapper hands them back that way. Export the stages the job has, and `summarize` always: the run is closed there. A stage exported without being declared throws when NetSuite calls it, rather than quietly passing values through.
 
 Plenty of jobs answer nothing, because the records they write are the point. Such a job declares no `summarize` and still exports it, and the wrapper closes the run for it; one that wants a last word without a result (a notification when the run ends) declares `summarize` with a `void` return. Either way the run's `Result` is `null`, and a page watches `status`, the progress fields and `errors` instead of a result.
 
 Reading a run asks the task about progress as well. `stagePercentComplete` is `getPercentageCompleted()`, which NetSuite documents as the percentage complete of the **stage being processed**, so it counts to 100 once per stage; `itemsProcessed` and `itemsTotal` come from that stage's `getTotal*Count()` and `getPending*Count()` pair and only go up. The record keeps the percent (100 once a run ends) but never the counts, so the counts are null for a run that has ended or whose task id NetSuite has purged — by then the run has the result, which the record did keep.
 
-The store belongs in a repository, because it writes a record and submits a task. Keep it job-agnostic: whatever decides a run should start (a service, in the layout the template scaffolds) passes the job and the input.
+The store belongs in a repository, because it writes a record and submits a task. Keep it job-agnostic: whatever decides a run should start passes the job and the input. In the folder shape that decision belongs in the job's own folder (`start.ts`), so everything about a job is one place and a controller reaches for it by name.
 
 ```ts
 // api/src/repositories/jobRunRepository.ts

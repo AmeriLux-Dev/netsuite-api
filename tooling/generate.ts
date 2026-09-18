@@ -2,7 +2,7 @@ import * as nodePath from 'node:path';
 import { resolveInlineTypesFile, resolveJobRunFieldIds } from './config.js';
 import type { ResolvedClientGeneratorConfig } from './config.js';
 import { isControllerFileName, readControllerContract } from './controllerReader.js';
-import type { ControllerContract, ControllerProblem } from './controllerReader.js';
+import type { ControllerContract, ControllerProblem, InlinedTypeImport } from './controllerReader.js';
 import {
     CLIENT_INDEX_FILE_NAME,
     JOBS_INDEX_FILE_NAME,
@@ -17,7 +17,7 @@ import {
     sortJobs,
 } from './emit.js';
 import type { EmittedController, EmittedJob, EmittedJobRuns, InlinedTypeSection } from './emit.js';
-import { isJobFileName, readJobContract } from './jobReader.js';
+import { jobDefinitionFileName, readJobContract, readJobFolderName } from './jobReader.js';
 import type { JobContract } from './jobReader.js';
 import { toPosixPath } from './file-system.js';
 import type { FileSystemAdapter } from './file-system.js';
@@ -229,16 +229,51 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
         problems.push(...findDatesInRequestShapes(contract, inlinedTypes, controllerLabel));
         emitted.push({ contract, sourceLabel: controllerLabel, inlinedTypes });
     }
-    // Jobs: the same reading, with a run instead of a request and a record instead of a reply.
+    // Jobs: the same reading, with a run instead of a request and a record instead of a reply. A job is a
+    // folder — <name>/<name>.ts declares it and its stage files sit beside it — so the shapes on either end
+    // of a run are read wherever the stage that names them lives.
     const jobsDirectory = resolve(config.jobs);
     const emittedJobs: EmittedJob[] = [];
-    for (const filePath of fileSystem.listFiles(jobsDirectory)) {
-        const jobLabel = label(filePath);
-        if (!isJobFileName(nodePath.basename(filePath))) {
-            problems.push({ filePath: jobLabel, message: 'a job file is named <name>.ts, with <name> in camelCase; nothing else lives in the jobs folder.' });
+
+    /** Copies what one type import names into the job's sections, following imports between the files it reaches. */
+    function addInlinedTypes(sections: InlinedTypeSection[], typeImport: InlinedTypeImport, fromLabel: string): void {
+        const file = readInlinable(typeImport.specifier);
+        if (!file || file === 'missing') return;
+        const selected = selectInlinedTypes(file, typeImport.names, fromLabel, readInlinable);
+        problems.push(...selected.problems);
+        for (const selectedSection of selected.sections) addDeclarations(sections, selectedSection.filePath, selectedSection.declarations);
+    }
+
+    /** One section per source file, so a shape copied twice is written once. */
+    function addDeclarations(sections: InlinedTypeSection[], sourceLabel: string, declarations: { name: string; text: string }[]): void {
+        const section = sections.find((existing) => existing.sourceLabel === sourceLabel);
+        if (section) section.declarations.push(...declarations.filter((declaration) => !section.declarations.some((existing) => existing.name === declaration.name)));
+        else sections.push({ sourceLabel, declarations: [...declarations] });
+    }
+
+    for (const strayPath of fileSystem.listFiles(jobsDirectory)) {
+        problems.push({ filePath: label(strayPath), message: 'a job lives in a folder of its own, declared by the file of that name; nothing sits in the jobs folder itself.' });
+    }
+    for (const jobDirectory of fileSystem.listDirectories(jobsDirectory)) {
+        const jobName = readJobFolderName(nodePath.basename(jobDirectory));
+        if (jobName === undefined) {
+            problems.push({ filePath: label(jobDirectory), message: 'a job folder is named for its job, in camelCase.' });
             continue;
         }
-        const result = readJobContract(jobLabel, fileSystem.readTextFile(filePath), { typeImports: config.typeImports, inlineTypes: config.inlineTypes });
+        const definitionPath = nodePath.join(jobDirectory, jobDefinitionFileName(jobName));
+        if (!fileSystem.fileExists(definitionPath)) {
+            problems.push({ filePath: label(jobDirectory), message: `there is no ${jobDefinitionFileName(jobName)} here; the file of the folder's own name is what declares the job.` });
+            continue;
+        }
+        const jobLabel = label(definitionPath);
+        const result = readJobContract(jobLabel, fileSystem.readTextFile(definitionPath), {
+            typeImports: config.typeImports,
+            inlineTypes: config.inlineTypes,
+            readStageFile: (specifier) => {
+                const stagePath = `${nodePath.resolve(jobDirectory, specifier)}.ts`;
+                return fileSystem.fileExists(stagePath) ? { filePath: label(stagePath), source: fileSystem.readTextFile(stagePath) } : undefined;
+            },
+        });
         problems.push(...result.problems);
         const contract = result.contract;
         if (!contract) continue;
@@ -246,17 +281,12 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
             problems.push({ filePath: jobLabel, message: `a controller is named '${contract.name}' too; their generated modules would be the same file.` });
         }
         const inlinedTypes: InlinedTypeSection[] = [];
-        for (const typeImport of contract.inlinedTypeImports) {
-            const file = readInlinable(typeImport.specifier);
-            if (!file || file === 'missing') continue;
-            const selected = selectInlinedTypes(file, typeImport.names, jobLabel, readInlinable);
-            problems.push(...selected.problems);
-            for (const selectedSection of selected.sections) {
-                const section = inlinedTypes.find((existing) => existing.sourceLabel === selectedSection.filePath);
-                if (section) section.declarations.push(...selectedSection.declarations.filter((declaration) => !section.declarations.some((existing) => existing.name === declaration.name)));
-                else inlinedTypes.push({ sourceLabel: selectedSection.filePath, declarations: selectedSection.declarations });
-            }
+        // A stage file's own shapes, then whatever it takes from a service: both are the run's, written where its stages are.
+        for (const stageFile of contract.stageFiles) {
+            addDeclarations(inlinedTypes, stageFile.filePath, stageFile.declarations);
+            for (const typeImport of stageFile.inlinedTypeImports) addInlinedTypes(inlinedTypes, typeImport, stageFile.filePath);
         }
+        for (const typeImport of contract.inlinedTypeImports) addInlinedTypes(inlinedTypes, typeImport, jobLabel);
         problems.push(...findDatesInJobInput(contract, inlinedTypes, jobLabel));
         emittedJobs.push({ contract, sourceLabel: jobLabel, inlinedTypes });
     }

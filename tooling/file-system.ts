@@ -11,6 +11,8 @@ export interface FileSystemAdapter {
     ensureDirectory(directoryPath: string): void;
     /** Lists the absolute paths of the files directly inside a directory. Returns [] when it does not exist. */
     listFiles(directoryPath: string): string[];
+    /** Lists the absolute paths of the directories directly inside a directory: one per job, under the jobs folder. */
+    listDirectories(directoryPath: string): string[];
 }
 
 export function toPosixPath(filePath: string): string {
@@ -29,6 +31,14 @@ export function createNodeFileSystemAdapter(): FileSystemAdapter {
             return nodeFileSystem
                 .readdirSync(directoryPath, { withFileTypes: true })
                 .filter((entry) => entry.isFile())
+                .map((entry) => nodePath.join(directoryPath, entry.name))
+                .sort();
+        },
+        listDirectories: (directoryPath) => {
+            if (!nodeFileSystem.existsSync(directoryPath) || !nodeFileSystem.statSync(directoryPath).isDirectory()) return [];
+            return nodeFileSystem
+                .readdirSync(directoryPath, { withFileTypes: true })
+                .filter((entry) => entry.isDirectory())
                 .map((entry) => nodePath.join(directoryPath, entry.name))
                 .sort();
         },
@@ -70,6 +80,18 @@ export function createInMemoryFileSystemAdapter(initialFiles: Record<string, str
             return Array.from(files.keys())
                 .filter((filePath) => filePath.startsWith(prefix) && !filePath.slice(prefix.length).includes('/'))
                 .sort();
+        },
+        listDirectories: (directoryPath) => {
+            const prefix = `${normalizeKey(directoryPath)}/`;
+            const names = new Set<string>();
+            for (const filePath of [...files.keys(), ...directories]) {
+                if (!filePath.startsWith(prefix)) continue;
+                const [name, ...rest] = filePath.slice(prefix.length).split('/');
+                if (name !== undefined && rest.length > 0) names.add(name);
+            }
+            return Array.from(names)
+                .sort()
+                .map((name) => `${prefix}${name}`);
         },
     };
 }
