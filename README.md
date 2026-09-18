@@ -232,6 +232,8 @@ export const { getInputData, map, summarize } = defineJob({
 
 Each stage is then a file named after the stage NetSuite calls, holding the work and the shapes on its own boundary — open map.ts to see what the map stage does:
 
+Only the result has to be a shape the client can carry, because it is the only one a browser is handed. The items a run is planned into are the stage's own working types and stay on the server, so they may be built on whatever the server has — a carrier's API request, a customer's configuration — and the generator does not ask them to be carryable.
+
 ```ts
 // api/src/jobs/closeStaleOrders/getInputData.ts
 import { listStaleOrders, type StaleOrder } from '../../services/staleOrderService';

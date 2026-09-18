@@ -47,11 +47,11 @@ export type CustomerPatch = EntityPatch<Customer>;
             problems: [],
         });
         expect(selectInlinedTypes(file, [{ name: 'CustomerPatch' }], controllerPath).problems).toEqual([
-            { filePath: controllerPath, message: "type 'CustomerPatch' (types.ts) is built on EntityPatch from '@amerilux/netsuite-repository', which the client cannot carry; write the wire shape out in the controller instead." },
+            { filePath: controllerPath, about: 'CustomerPatch', message: "type 'CustomerPatch' (types.ts) is built on EntityPatch from '@amerilux/netsuite-repository', which the client cannot carry; write the wire shape out in the controller instead." },
         ]);
         expect(selectInlinedTypes(file, [{ name: 'EntityPatch' }, { name: 'Missing' }], controllerPath).problems).toEqual([
-            { filePath: controllerPath, message: "type 'EntityPatch' is imported into types.ts from '@amerilux/netsuite-repository', not declared there; the client cannot carry it." },
-            { filePath: controllerPath, message: "type 'Missing' is not declared in types.ts." },
+            { filePath: controllerPath, about: 'EntityPatch', message: "type 'EntityPatch' is imported into types.ts from '@amerilux/netsuite-repository', not declared there; the client cannot carry it." },
+            { filePath: controllerPath, about: 'Missing', message: "type 'Missing' is not declared in types.ts." },
         ]);
     });
 
@@ -84,11 +84,12 @@ export type EmployeeSummary = Pick<EmployeeRecord, 'id'>;
         expect(selectInlinedTypes(serviceFile, [{ name: 'EmployeeSummary' }], controllerPath, () => modelsFile).problems).toEqual([
             {
                 filePath: controllerPath,
+                about: 'EmployeeSummary',
                 message: "type 'EmployeeSummary' (api/src/services/employeeService.ts) is built on EmployeeRecord, imported from '../types/models.gen' as a rename of Employee; import it under its own name so the client can carry it.",
             },
         ]);
         expect(selectInlinedTypes(serviceFile, [{ name: 'EmployeeRecord' }], controllerPath, () => modelsFile).problems).toEqual([
-            { filePath: controllerPath, message: "type 'EmployeeRecord' is imported into api/src/services/employeeService.ts from '../types/models.gen' as a rename of Employee; import it under its own name so the client can carry it." },
+            { filePath: controllerPath, about: 'EmployeeRecord', message: "type 'EmployeeRecord' is imported into api/src/services/employeeService.ts from '../types/models.gen' as a rename of Employee; import it under its own name so the client can carry it." },
         ]);
         expect(selectInlinedTypes(serviceFile, [{ name: 'EmployeeSummary' }], controllerPath, () => 'missing')).toEqual({
             sections: [{ filePath: 'api/src/services/employeeService.ts', declarations: [{ name: 'EmployeeSummary', text: "export type EmployeeSummary = Pick<EmployeeRecord, 'id'>;" }] }],

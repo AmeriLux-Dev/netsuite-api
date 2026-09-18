@@ -226,8 +226,12 @@ export function emitJobModule({ contract, sourceLabel, inlinedTypes }: EmittedJo
  * The declared shapes a type names, and the shapes those name in turn: what a module has to carry for the
  * type to stand on its own. A name with no declaration here belongs to the package or to the language, and
  * the type import that brought it is what carries it.
+ *
+ * Every name the walk reaches is in the answer, including one nothing declares: a caller asking whether a
+ * type matters to the wire needs the names that could not be resolved as much as the ones that could. What
+ * is emitted is filtered against declarations, so the unresolved names add nothing to a module.
  */
-function findTypesReachedBy(type: string, ownDeclarations: TypeDeclaration[], inlinedTypes: InlinedTypeSection[]): Set<string> {
+export function findTypesReachedBy(type: string, ownDeclarations: TypeDeclaration[], inlinedTypes: InlinedTypeSection[]): Set<string> {
     const declarationsByName = new Map<string, string>();
     for (const section of inlinedTypes) for (const declaration of section.declarations) declarationsByName.set(declaration.name, declaration.text);
     for (const declaration of ownDeclarations) declarationsByName.set(declaration.name, declaration.text);
@@ -236,9 +240,9 @@ function findTypesReachedBy(type: string, ownDeclarations: TypeDeclaration[], in
     while (pending.length > 0) {
         const name = pending.shift() as string;
         if (carried.has(name)) continue;
+        carried.add(name);
         const text = declarationsByName.get(name);
         if (text === undefined) continue;
-        carried.add(name);
         pending.push(...readReferencedNames(text, 'declaration'));
     }
     return carried;

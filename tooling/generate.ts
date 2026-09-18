@@ -11,6 +11,7 @@ import {
     emitControllerModule,
     emitJobModule,
     emitJobsIndexModule,
+    findTypesReachedBy,
     emitScriptsModule,
     jobModuleFileName,
     sortControllers,
@@ -236,11 +237,11 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
     const emittedJobs: EmittedJob[] = [];
 
     /** Copies what one type import names into the job's sections, following imports between the files it reaches. */
-    function addInlinedTypes(sections: InlinedTypeSection[], typeImport: InlinedTypeImport, fromLabel: string): void {
+    function addInlinedTypes(sections: InlinedTypeSection[], typeImport: InlinedTypeImport, fromLabel: string, sink: ControllerProblem[]): void {
         const file = readInlinable(typeImport.specifier);
         if (!file || file === 'missing') return;
         const selected = selectInlinedTypes(file, typeImport.names, fromLabel, readInlinable);
-        problems.push(...selected.problems);
+        sink.push(...selected.problems);
         for (const selectedSection of selected.sections) addDeclarations(sections, selectedSection.filePath, selectedSection.declarations);
     }
 
@@ -282,11 +283,27 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
         }
         const inlinedTypes: InlinedTypeSection[] = [];
         // What the job's own files declare, then whatever they take from a service: both are the run's shapes.
+        const inliningProblems: ControllerProblem[] = [];
         for (const folderFile of contract.folderFiles) {
             addDeclarations(inlinedTypes, folderFile.filePath, folderFile.declarations);
-            for (const typeImport of folderFile.inlinedTypeImports) addInlinedTypes(inlinedTypes, typeImport, folderFile.filePath);
+            for (const typeImport of folderFile.inlinedTypeImports) addInlinedTypes(inlinedTypes, typeImport, folderFile.filePath, inliningProblems);
         }
-        for (const typeImport of contract.inlinedTypeImports) addInlinedTypes(inlinedTypes, typeImport, jobLabel);
+        for (const typeImport of contract.inlinedTypeImports) addInlinedTypes(inlinedTypes, typeImport, jobLabel, inliningProblems);
+        // The result is the only shape of a run the client is given, so it is the only one that has to be
+        // carryable. A stage's working types stay on the server: the items a run is planned into may be built
+        // on a carrier's API request or a customer's configuration, and none of that is the client's business.
+        const carriedByResult = contract.resultType === undefined
+            ? new Set<string>()
+            : findTypesReachedBy(contract.resultType, contract.typeDeclarations, inlinedTypes);
+        // One mistake, reported once: the message names the file the shape lives in, so which stage file
+        // imported it adds nothing, and a shape three stages name would otherwise be reported three times.
+        const reportedMessages = new Set<string>();
+        for (const problem of inliningProblems) {
+            if (problem.about !== undefined && !carriedByResult.has(problem.about)) continue;
+            if (reportedMessages.has(problem.message)) continue;
+            reportedMessages.add(problem.message);
+            problems.push(problem);
+        }
         problems.push(...findDatesInJobInput(contract, inlinedTypes, jobLabel));
         emittedJobs.push({ contract, sourceLabel: jobLabel, inlinedTypes });
     }

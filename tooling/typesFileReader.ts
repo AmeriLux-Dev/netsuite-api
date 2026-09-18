@@ -133,6 +133,7 @@ export function selectInlinedTypes(file: InlinableTypesFile, names: TypeImportNa
             } else if (imported) {
                 problems.push({
                     filePath: controllerPath,
+                    about: dependent ?? name,
                     message: dependent
                         ? `type '${dependent}' (${current.filePath}) is built on ${name}, imported from '${importedFrom}' as a rename of ${exportedName}; import it under its own name so the client can carry it.`
                         : `type '${name}' is imported into ${current.filePath} from '${importedFrom}' as a rename of ${exportedName}; import it under its own name so the client can carry it.`,
@@ -140,13 +141,14 @@ export function selectInlinedTypes(file: InlinableTypesFile, names: TypeImportNa
             } else {
                 problems.push({
                     filePath: controllerPath,
+                    about: dependent ?? name,
                     message: dependent
                         ? `type '${dependent}' (${current.filePath}) is built on ${name} from '${importedFrom}', which the client cannot carry; write the wire shape out in the controller instead.`
                         : `type '${name}' is imported into ${current.filePath} from '${importedFrom}', not declared there; the client cannot carry it.`,
                 });
             }
         } else if (dependent === undefined) {
-            problems.push({ filePath: controllerPath, message: `type '${name}' is not declared in ${current.filePath}.` });
+            problems.push({ filePath: controllerPath, about: name, message: `type '${name}' is not declared in ${current.filePath}.` });
         }
         // Anything else a declaration refers to is a global (Date, Record, Array): nothing to copy.
     }

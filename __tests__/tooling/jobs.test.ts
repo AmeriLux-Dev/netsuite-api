@@ -279,6 +279,57 @@ export const summarizeFunction = (summary: JobSummary<CloseOutcome>): CloseStale
         expect(module).toContain('export interface CloseOutcome {');
         expect(module).toContain('// Types from api/src/jobs/closeStaleOrders/map.ts, copied so this module stands on its own.');
     });
+
+    it('leaves a stage\'s own working types out of what the client carries, and still reports one the result reaches', () => {
+        // The items a run is planned into stay on the server, so what they are built on is nobody's business
+        // but the stage's; the result is the one shape a browser is handed.
+        const serviceWithAHandle = `import type { PrinterHandle } from '../repositories/printerRepository';
+import type { Employee } from '../types/models.gen';
+
+/** A sales order old enough to close, as the service hands it up. */
+export interface StaleOrder {
+    id: number;
+    owner: Pick<Employee, 'id' | 'name'>;
+    /** The printer its paperwork came off: a repository handle, of no use to a browser. */
+    printer: PrinterHandle;
+}
+
+export function listStaleOrders(olderThanDays: number): StaleOrder[] {
+    return olderThanDays > 0 ? [] : [];
+}
+
+export function closeOrder(orderId: number): boolean {
+    return orderId > 0;
+}
+`;
+        const serviceFile = nodePath.join(apiDirectory, 'services', 'staleOrderService.ts');
+        const plan = planClientGeneration(optionsFor(projectFiles({ ...stageShapedJob, [serviceFile]: serviceWithAHandle })));
+        const module = plan.files.find((planned) => planned.path === jobModuleFile)?.content ?? '';
+
+        expect(plan.problems).toEqual([]);
+        expect(module).toContain('export type Result = CloseStaleResult;');
+        expect(module).not.toContain('PrinterHandle');
+
+        // The same shape named in the result is the client's business, and then it is reported.
+        const resultNamingTheOrder = {
+            ...stageShapedJob,
+            [serviceFile]: serviceWithAHandle,
+            [jobFile('closeStaleOrders', 'summarize.ts')]: `import type { JobSummary } from '@amerilux/netsuite-api/server';
+import type { StaleOrder } from '../../services/staleOrderService';
+
+/** What the run leaves behind for the page that started it. */
+export interface CloseStaleResult {
+    closed: StaleOrder[];
+}
+
+export const summarizeFunction = (_summary: JobSummary<number>): CloseStaleResult => ({ closed: [] });
+`,
+        };
+
+        expect(planClientGeneration(optionsFor(projectFiles(resultNamingTheOrder))).problems.map((problem) => problem.message)).toEqual([
+            "type 'StaleOrder' (api/src/services/staleOrderService.ts) is built on PrinterHandle from '../repositories/printerRepository', which the client cannot carry; write the wire shape out in the controller instead.",
+        ]);
+    });
     it('says so when a stage names something the definition file does not import', () => {
         const withUnknownStage = { ...stageShapedJob, [jobFile('closeStaleOrders')]: stageShapedJob[jobFile('closeStaleOrders')].replace('map: mapFunction', 'map: mapTheOrders') };
         const problems = planClientGeneration(optionsFor(projectFiles(withUnknownStage))).problems.map((problem) => problem.message);

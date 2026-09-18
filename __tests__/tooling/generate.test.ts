@@ -153,6 +153,7 @@ export type Total = Money;
             { filePath: 'api/src/services/orderService.ts', message: "the file to copy types from does not exist; '../services/orderService' names it." },
             {
                 filePath: 'api/src/controllers/ordersController.ts',
+                about: 'Total',
                 message: "type 'Total' (api/src/services/totalsService.ts) is built on Money from '@amerilux/money', which the client cannot carry; write the wire shape out in the controller instead.",
             },
         ]);
@@ -210,9 +211,10 @@ export const employeeEndpoints = defineEndpoints({ create: (request: EmployeeCre
         const plan = planClientGeneration(optionsFor(projectFiles({ [nodePath.join(controllersDirectory, 'employeeController.ts')]: employeeController })));
         expect(plan.problems).toEqual([
             { filePath: 'api/src/controllers/employeeController.ts', message: "imports types from './ordersController', which is not a controller in api/src/controllers." },
-            { filePath: 'api/src/controllers/employeeController.ts', message: "type 'Missing' is not declared in api/src/types/models.gen.ts." },
+            { filePath: 'api/src/controllers/employeeController.ts', about: 'Missing', message: "type 'Missing' is not declared in api/src/types/models.gen.ts." },
             {
                 filePath: 'api/src/controllers/employeeController.ts',
+                about: 'EmployeeCreate',
                 message: "type 'EmployeeCreate' (api/src/types/models.gen.ts) is built on EntityCreate from '@amerilux/netsuite-repository', which the client cannot carry; write the wire shape out in the controller instead.",
             },
         ]);

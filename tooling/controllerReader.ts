@@ -15,6 +15,8 @@ import { toPosixPath } from './file-system.js';
 export interface ControllerProblem {
     filePath: string;
     message: string;
+    /** The type the problem is about, when it is about one: what lets a job drop a problem its result never reaches. */
+    about?: string;
 }
 
 export interface EndpointSignature {
