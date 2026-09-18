@@ -1,9 +1,9 @@
 import { GENERATED_CLIENT_NAME, GENERATED_ENDPOINTS_TYPE_NAME } from './controllerReader.js';
 import type { ControllerContract, DeclaredScript, EndpointSignature, TypeDeclaration, TypeImportName } from './controllerReader.js';
 import type { JobRunFieldName } from './config.js';
-import { GENERATED_JOB_INPUT_TYPE_NAME, GENERATED_JOB_RESULT_TYPE_NAME } from './jobReader.js';
+import { GENERATED_JOB_RESULT_TYPE_NAME } from './jobReader.js';
 import type { JobContract } from './jobReader.js';
-import { writeDatesAsStrings } from './wireTypes.js';
+import { readReferencedNames, writeDatesAsStrings } from './wireTypes.js';
 
 /**
  * Writes the generated modules. Each controller gets its own client module, `<name>.gen.ts`: the
@@ -12,8 +12,9 @@ import { writeDatesAsStrings } from './wireTypes.js';
  * namespace, so a hook writes `user.api.roles()` and names a shape as `user.RolesResponse`. The
  * scripts module is the server-side map a repository passes to createSuiteletClient.
  *
- * A job gets a module of the same kind, `<name>Job.gen.ts`, holding the shapes on either end of a run
- * (`Input` and `Result`) and nothing callable: a page starts a job through a controller, not directly.
+ * A job gets a module of the same kind, `<name>Job.gen.ts`, holding the shape a finished run carries
+ * (`Result`) and nothing callable: a page starts a job through a controller, not directly, and a run's
+ * input is the service's own type, named where the run is started rather than in the browser.
  * They are reached under `jobs` (`jobs.closeStaleOrders.Result`). Server-side, the scripts module
  * carries the jobs as well, and the run record's ids next to them.
  */
@@ -186,19 +187,25 @@ export function sortJobs(jobs: EmittedJob[]): EmittedJob[] {
 
 /** A job's module: the shapes a run is started with and ends in, and the types they are built from. */
 export function emitJobModule({ contract, sourceLabel, inlinedTypes }: EmittedJob): string {
-    const declarations: string[] = [];
-    for (const section of inlinedTypes) {
-        declarations.push(`// Types from ${section.sourceLabel}, copied so this module stands on its own.`);
-        for (const declaration of section.declarations) declarations.push(writeDatesAsStrings(declaration.text, 'declaration'));
-    }
-    for (const declaration of contract.typeDeclarations) declarations.push(writeDatesAsStrings(declaration.text, 'declaration'));
-    const inputType = contract.inputType === undefined ? 'void' : writeDatesAsStrings(contract.inputType, 'type');
     // A job that answers nothing has no summarize, or one that returns nothing: either way the run's result is null,
     // which is what the record holds and what the page reads back.
     const resultType = contract.resultType === undefined || RESULTLESS_TYPE_NAMES.has(contract.resultType.trim()) ? 'null' : writeDatesAsStrings(contract.resultType, 'type');
-    // A job's stages name package types the run's shapes do not (JobSummary on summarize), and those are
+    // Only what the result names, because that is all this module declares: the shape a run is started with is
+    // the service's, named where the run is started, and a stage's own item types never leave the server.
+    const carried = findTypesReachedBy(resultType, contract.typeDeclarations, inlinedTypes);
+    const declarations: string[] = [];
+    for (const section of inlinedTypes) {
+        const kept = section.declarations.filter((declaration) => carried.has(declaration.name));
+        if (kept.length === 0) continue;
+        declarations.push(`// Types from ${section.sourceLabel}, copied so this module stands on its own.`);
+        for (const declaration of kept) declarations.push(writeDatesAsStrings(declaration.text, 'declaration'));
+    }
+    for (const declaration of contract.typeDeclarations) {
+        if (carried.has(declaration.name)) declarations.push(writeDatesAsStrings(declaration.text, 'declaration'));
+    }
+    // A job's stages name package types the result does not (JobSummary on summarize), and those are
     // server-side: only an import a shape actually reaches is carried over.
-    const emittedText = [...declarations, inputType, resultType].join('\n');
+    const emittedText = [...declarations, resultType].join('\n');
     const usedTypeImports = contract.carriedTypeImports
         .map((typeImport) => ({ ...typeImport, names: typeImport.names.filter((imported) => new RegExp(`\\b${imported.alias ?? imported.name}\\b`).test(emittedText)) }))
         .filter((typeImport) => typeImport.names.length > 0);
@@ -211,16 +218,37 @@ export function emitJobModule({ contract, sourceLabel, inlinedTypes }: EmittedJo
         emitTypeImports(usedTypeImports).join('\n'),
         ...declarations,
     ];
-    sections.push(`/** What a run of the ${contract.name} job is started with. */\nexport type ${GENERATED_JOB_INPUT_TYPE_NAME} = ${inputType};`);
     sections.push(`/** What a finished run of the ${contract.name} job carries as its result. */\nexport type ${GENERATED_JOB_RESULT_TYPE_NAME} = ${resultType};`);
     return `${sections.filter((section) => section !== '').join('\n\n')}\n`;
+}
+
+/**
+ * The declared shapes a type names, and the shapes those name in turn: what a module has to carry for the
+ * type to stand on its own. A name with no declaration here belongs to the package or to the language, and
+ * the type import that brought it is what carries it.
+ */
+function findTypesReachedBy(type: string, ownDeclarations: TypeDeclaration[], inlinedTypes: InlinedTypeSection[]): Set<string> {
+    const declarationsByName = new Map<string, string>();
+    for (const section of inlinedTypes) for (const declaration of section.declarations) declarationsByName.set(declaration.name, declaration.text);
+    for (const declaration of ownDeclarations) declarationsByName.set(declaration.name, declaration.text);
+    const carried = new Set<string>();
+    const pending = readReferencedNames(type, 'type');
+    while (pending.length > 0) {
+        const name = pending.shift() as string;
+        if (carried.has(name)) continue;
+        const text = declarationsByName.get(name);
+        if (text === undefined) continue;
+        carried.add(name);
+        pending.push(...readReferencedNames(text, 'declaration'));
+    }
+    return carried;
 }
 
 /** The jobs index: every job module under the job's name, reached as `jobs.<name>` from the client index. */
 export function emitJobsIndexModule(jobs: EmittedJob[], options: { jobsLabel: string }): string {
     const lines = [`// Generated by netsuite-api generate from ${options.jobsLabel}. Do not edit: change the jobs and run \`npm run generate\`.`, ESLINT_DISABLE, ''];
     for (const { contract } of sortJobs(jobs)) {
-        lines.push(`/** The ${contract.name} job: the shapes a run of it is started with and ends in. */`, `export * as ${contract.name} from './${jobModuleFileName(contract.name).replace(/\.ts$/, '')}';`);
+        lines.push(`/** The ${contract.name} job: the shape a finished run of it carries. */`, `export * as ${contract.name} from './${jobModuleFileName(contract.name).replace(/\.ts$/, '')}';`);
     }
     return `${lines.join('\n')}\n`;
 }

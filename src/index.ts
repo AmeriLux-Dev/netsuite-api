@@ -173,14 +173,13 @@ export interface JobRun<TResult = unknown, TExtra extends Record<string, unknown
  * A run as a list shows it: the fields a query can read, so finding a run costs one query rather than a
  * record load each. It carries no input, result or errors — a page finds a run here and then asks about
  * it by id, which is also the only reading that consults the task, so a `running` row in a list is
- * "last we knew", not a promise.
+ * "last we knew", not a promise. Progress is not here either, for the same reason: only the task has it.
  */
 export interface JobRunListEntry {
     id: string;
     job: string;
     status: JobRunStatus;
     stage: JobRunStage | null;
-    stagePercentComplete: number;
     startedBy: number | null;
 }
 

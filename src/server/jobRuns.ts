@@ -288,16 +288,15 @@ export function createJobRunStore(config: JobRunsConfig): JobRunStore {
             const limit = Math.min(Math.max(runQuery.limit ?? 10, 1), 100);
             const rows = query
                 .runSuiteQL({
-                    query: `SELECT id, ${fields.job} AS job, ${fields.status} AS status, ${fields.stage} AS stage, ${fields.stagePercentComplete} AS percent, ${fields.startedBy} AS startedby FROM ${recordType}${where} ORDER BY id DESC FETCH FIRST ${limit} ROWS ONLY`,
+                    query: `SELECT id, ${fields.job} AS job, ${fields.status} AS status, ${fields.stage} AS stage, ${fields.startedBy} AS startedby FROM ${recordType}${where} ORDER BY id DESC FETCH FIRST ${limit} ROWS ONLY`,
                     params,
                 })
-                .asMappedResults() as { id: string | number; job: string; status: string; stage: string; percent: string | number; startedby: string | number | null }[];
+                .asMappedResults() as { id: string | number; job: string; status: string; stage: string; startedby: string | number | null }[];
             return rows.map((row) => ({
                 id: String(row.id),
                 job: String(row.job ?? ''),
                 status: (row.status || 'pending') as JobRunStatus,
                 stage: (row.stage || null) as JobRunStage | null,
-                stagePercentComplete: Number(row.percent) || 0,
                 startedBy: row.startedby === null || row.startedby === undefined || row.startedby === '' ? null : Number(row.startedby),
             }));
         },

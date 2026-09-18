@@ -283,16 +283,16 @@ describe('findRuns', () => {
     it('answers the caller its own runs of one job, newest first, without loading a record', () => {
         runSuiteQL.mockReturnValue({
             asMappedResults: () => [
-                { id: 9, job: 'closeStaleOrders', status: 'running', stage: 'map', percent: 40, startedby: 7 },
-                { id: 4, job: 'closeStaleOrders', status: 'complete', stage: 'summarize', percent: 100, startedby: 7 },
+                { id: 9, job: 'closeStaleOrders', status: 'running', stage: 'map', startedby: 7 },
+                { id: 4, job: 'closeStaleOrders', status: 'complete', stage: 'summarize', startedby: 7 },
             ],
         } as never);
 
         const runs = createJobRunStore(jobRuns).findRuns({ job: 'closeStaleOrders', startedBy: 7, limit: 5 });
 
         expect(runs).toEqual([
-            { id: '9', job: 'closeStaleOrders', status: 'running', stage: 'map', stagePercentComplete: 40, startedBy: 7 },
-            { id: '4', job: 'closeStaleOrders', status: 'complete', stage: 'summarize', stagePercentComplete: 100, startedBy: 7 },
+            { id: '9', job: 'closeStaleOrders', status: 'running', stage: 'map', startedBy: 7 },
+            { id: '4', job: 'closeStaleOrders', status: 'complete', stage: 'summarize', startedBy: 7 },
         ]);
         expect(loadRecord).not.toHaveBeenCalled();
         const sent = runSuiteQL.mock.calls[0][0] as { query: string; params: unknown[] };

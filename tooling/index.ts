@@ -4,7 +4,7 @@ export { JOB_RUN_FIELD_SUFFIXES, netsuiteValueTypeNames, resolveJobRunFieldIds }
 export type { ClientGeneratorConfig, JobRunFieldName, JobRunsSettings, NetsuiteValueTypeName, ResolvedClientGeneratorConfig } from './config.js';
 export { GENERATED_CLIENT_NAME, GENERATED_ENDPOINTS_TYPE_NAME, RAW_RESPONSE_TYPE_NAME, isControllerFileName, readControllerContract, readLeadingJsDoc } from './controllerReader.js';
 export type { CarriedTypeImport, ControllerContract, ControllerKind, ControllerProblem, ControllerReadResult, ControllerTypeImport, DeclaredScript, EndpointSignature, InlinedTypeImport, ReadControllerOptions, TypeDeclaration, TypeImportName } from './controllerReader.js';
-export { GENERATED_JOB_INPUT_TYPE_NAME, GENERATED_JOB_RESULT_TYPE_NAME, JOB_SCRIPT_TYPE_HEADER, JOB_STAGE_NAMES, isJobFileName, readJobContract } from './jobReader.js';
+export { GENERATED_JOB_RESULT_TYPE_NAME, JOB_SCRIPT_TYPE_HEADER, JOB_STAGE_NAMES, isJobFileName, readJobContract } from './jobReader.js';
 export type { DeclaredJob, JobContract, JobParameterContract, JobReadResult, JobStageName } from './jobReader.js';
 export { readInlinableTypesFile, selectInlinedTypes } from './typesFileReader.js';
 export type { InlinableTypeDeclaration, InlinableTypesFile, SelectedInlinedTypes } from './typesFileReader.js';

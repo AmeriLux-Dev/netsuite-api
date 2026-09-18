@@ -20,7 +20,6 @@ export type JobStageName = (typeof JOB_STAGE_NAMES)[number];
 export const JOB_SCRIPT_TYPE_HEADER = 'MapReduceScript';
 
 /** The type the generated job module gives the run's input, and the one it gives the result. */
-export const GENERATED_JOB_INPUT_TYPE_NAME = 'Input';
 export const GENERATED_JOB_RESULT_TYPE_NAME = 'Result';
 
 const jobFileNamePattern = /^([a-z][A-Za-z0-9]*)\.ts$/;
@@ -238,11 +237,11 @@ export function readJobContract(filePath: string, source: string, options: ReadC
         }
         if (ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement) || ts.isEnumDeclaration(statement)) {
             if (!hasExportModifier(statement)) {
-                problems.push({ filePath, message: `'${statement.name.text}' is not exported; a job's input and result shapes reach the browser, so export them.` });
+                problems.push({ filePath, message: `'${statement.name.text}' is not exported; the generator copies the shapes a run's result names into the browser's module as they are written, so export them.` });
                 continue;
             }
-            if (statement.name.text === GENERATED_JOB_INPUT_TYPE_NAME || statement.name.text === GENERATED_JOB_RESULT_TYPE_NAME) {
-                problems.push({ filePath, message: `type '${statement.name.text}' is the name the generated module gives the run's ${statement.name.text === GENERATED_JOB_INPUT_TYPE_NAME ? 'input' : 'result'}; call this shape something else.` });
+            if (statement.name.text === GENERATED_JOB_RESULT_TYPE_NAME) {
+                problems.push({ filePath, message: `type '${statement.name.text}' is the name the generated module gives the run's result; call this shape something else.` });
                 continue;
             }
             const jsDoc = readLeadingJsDoc(statement, sourceFile);

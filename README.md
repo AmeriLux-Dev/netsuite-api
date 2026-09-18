@@ -252,7 +252,7 @@ export const startClosingOldOrders = (olderThanDays: number) => startJobRun(jobs
 
 `read` is the reason a dead run does not look like a working one: it takes status, stage and progress from `N/task.checkStatus` as well as the record, so a task NetSuite gave up on is `failed`, and a task that finished without writing a result is `failed` too. `findExpired(days)` and `remove` are what a cleanup job runs on a schedule; run records are not meant to be permanent.
 
-`findRuns({ job, startedBy, unfinishedOnly, limit })` answers the matching runs newest first, in one query and without loading a record: it is how a page finds the run it lost track of, because the run knows who started it even after a browser has forgotten. Its rows carry what the record says, not what the task says, so read a run by id before believing one is still working.
+`findRuns({ job, startedBy, unfinishedOnly, limit })` answers the matching runs newest first, in one query and without loading a record: it is how a page finds the run it lost track of, because the run knows who started it even after a browser has forgotten. Its rows carry what the record says, not what the task says, so read a run by id before believing one is still working — and they carry no progress at all, because only the task has any.
 
 ### The run record
 

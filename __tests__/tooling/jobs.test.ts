@@ -147,15 +147,27 @@ describe('planClientGeneration with jobs', () => {
         expect(plan.files.map((file) => file.path)).toEqual(expect.arrayContaining([jobModuleFile, jobsIndexFile, indexModuleFile, scriptsModuleFile]));
     });
 
-    it('writes the job module with its own shapes, the service types it names, and nothing callable', () => {
+    it('writes the job module with the result, the shapes the result names, and nothing callable', () => {
         const plan = planClientGeneration(optionsFor(projectFiles()));
         const module = plan.files.find((file) => file.path === jobModuleFile)?.content ?? '';
 
-        expect(module).toContain('export type Input = CloseStaleRequest;');
         expect(module).toContain('export type Result = CloseStaleResult;');
+        expect(module).toContain('export interface CloseStaleResult {');
+        expect(module).not.toContain('createApiClient');
+        // Nothing in the browser names what a run is started with or what its stages pass along, so neither is copied.
+        expect(module).not.toContain('export type Input');
+        expect(module).not.toContain('CloseStaleRequest');
+        expect(module).not.toContain('export interface StaleOrder');
+    });
+
+    it('copies a service type the result names, and says where it came from', () => {
+        const resultNamingStaleOrder = closeStaleOrdersJobSource.replace('    owners: string[];', '    sample: StaleOrder;').replace('owners: summary.output.map((entry) => entry.key),', 'sample: listStaleOrders(1)[0],');
+        const module =
+            planClientGeneration(optionsFor(projectFiles({ [nodePath.join(jobsDirectory, 'closeStaleOrders.ts')]: resultNamingStaleOrder })))
+                .files.find((file) => file.path === jobModuleFile)?.content ?? '';
+
         expect(module).toContain('export interface StaleOrder {');
         expect(module).toContain('// Types from api/src/services/staleOrderService.ts, copied so this module stands on its own.');
-        expect(module).not.toContain('createApiClient');
     });
 
     it('gives a job that answers nothing a null result, whether it has a summarize stage or not', () => {
