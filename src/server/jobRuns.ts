@@ -3,6 +3,7 @@ import * as query from 'N/query';
 import * as record from 'N/record';
 import * as runtime from 'N/runtime';
 import * as task from 'N/task';
+import type { EntryPoints } from 'N/types';
 import type { JobRef, JobRun, JobRunError, JobRunListEntry, JobRunQuery, JobRunStage, JobRunStatus, JobRunsConfig, NetsuiteValueType } from '../index.js';
 import { ApiError } from './apiError.js';
 
@@ -16,28 +17,17 @@ import { ApiError } from './apiError.js';
  *
  * The record is the application's own (`customrecord_<prefix>_job_run`), so the ids come in as the
  * generated `jobRuns` config rather than being written here. A repository builds the store once and
- * the jobs build their own from the same config; nothing is global.
+ * hands the stages what they need; nothing is global.
+ *
+ * A job is an ordinary Map/Reduce script, so three of these calls are what a run costs it: openRun on
+ * the first line of getInputData, currentRunId in a stage that records something against the run, and
+ * closeRun on the last line of summarize.
  */
 
 /** What startJob may add to the run beyond the input: the application's own fields on the run record. */
 export interface StartJobOptions {
     /** Values for the fields declared in `jobRuns.extraFields`, by name. */
     extra?: Record<string, unknown>;
-}
-
-/** What a stage's wrapper needs to find or open a run; not used by application code. */
-export interface ClaimRunDetails {
-    job: string;
-    /** The run id the script parameter carried, or undefined for a scheduled run, which opens its own. */
-    runId?: string;
-    deployment: string;
-}
-
-/** How a run ended, as summarize leaves it. */
-export interface FinishRunOutcome {
-    status: Extract<JobRunStatus, 'complete' | 'failed'>;
-    result: unknown;
-    errors: JobRunError[];
 }
 
 export interface JobRunStore {
@@ -58,16 +48,24 @@ export interface JobRunStore {
     /** Run ids older than the given number of days, for the cleanup job. */
     findExpired(olderThanDays: number): string[];
     remove(runId: string): void;
-    /** Opens the run a stage belongs to, creating one for a scheduled run. Called by the job wrapper. */
-    claimRun(details: ClaimRunDetails): string;
-    /** The input the run was started with; `{}` for a scheduled run. Called by the job wrapper. */
-    readInput<TInput>(runId: string): TInput;
-    /** The run id of whatever is running on this deployment, for the stages after getInputData. Called by the job wrapper. */
-    findRunningRunId(job: string, deployment: string): string | undefined;
-    /** Writes the result and the errors, and closes the run. Called by the job wrapper. */
-    finish(runId: string, outcome: FinishRunOutcome): void;
-    /** Marks the run failed with one error, for a stage that threw. Called by the job wrapper. */
-    fail(runId: string, error: JobRunError): void;
+    /**
+     * Opens the run this getInputData belongs to and answers what it was started with: the run id
+     * arrives as the script parameter, and a scheduled run, which has none, opens a run of its own.
+     * A job whose runs carry no input calls this without a type and ignores what comes back.
+     */
+    openRun<TInput>(job: JobRef): TInput;
+    /**
+     * The run this stage belongs to, for a stage that records something against it. Read from the
+     * script parameter, or found by the deployment the stage is running on, one run at a time being
+     * all a deployment can do. An empty string when there is no run to be found.
+     */
+    currentRunId(job: JobRef): string;
+    /**
+     * Writes the result and everything the run collected, and closes the run: the last thing
+     * summarize does. A run left unclosed (a summarize that threw before this) reads as failed,
+     * because NetSuite will have finished the task with no result on the record.
+     */
+    closeRun(job: JobRef, summary: EntryPoints.MapReduce.summarizeContext, result: unknown): void;
 }
 
 const STAGE_BY_TASK_STAGE: Record<string, JobRunStage> = {
@@ -123,8 +121,27 @@ function readDateField(raw: unknown): string | null {
 }
 
 /**
- * The store for one application's run record. Build it once where it is used: a repository for the
- * application's own calls, and the job wrapper for the stages.
+ * Everything NetSuite collected against the run, in the order it met it: the input stage's own
+ * failure, then every map and reduce key it could not finish. A stage that threw is in here because
+ * NetSuite put it here, which is also where the execution log has it.
+ */
+function readCollectedErrors(summary: EntryPoints.MapReduce.summarizeContext): JobRunError[] {
+    const errors: JobRunError[] = [];
+    if (summary.inputSummary?.error) errors.push({ stage: 'input', message: summary.inputSummary.error });
+    const collect = (stage: Extract<JobRunStage, 'map' | 'reduce'>, container?: EntryPoints.MapReduce.MapSummary | EntryPoints.MapReduce.ReduceSummary) => {
+        container?.errors.iterator().each((key, error) => {
+            errors.push({ stage, key, message: error });
+            return true;
+        });
+    };
+    collect('map', summary.mapSummary);
+    collect('reduce', summary.reduceSummary);
+    return errors;
+}
+
+/**
+ * The store for one application's run record. Build it once where it is used: the repository that
+ * starts runs and reads them, and hands the stages their three calls.
  */
 export function createJobRunStore(config: JobRunsConfig): JobRunStore {
     const { recordType, fields, extraFields } = config;
@@ -158,6 +175,29 @@ export function createJobRunStore(config: JobRunsConfig): JobRunStore {
             runRecord.setValue({ fieldId: field.id, value: writeTypedValue(value, field.type) });
         }
         return String(runRecord.save({ ignoreMandatoryFields: true }));
+    }
+
+    /** The run id this stage was passed, or undefined for a scheduled run, which was started with no run. */
+    function readRunIdParameter(job: JobRef): string | undefined {
+        const raw = runtime.getCurrentScript().getParameter({ name: job.runParameter });
+        return typeof raw === 'string' && raw !== '' ? raw : undefined;
+    }
+
+    /**
+     * The run a stage belongs to: the script parameter where there is one, and otherwise whatever is
+     * running on this deployment, which is one run at most. Empty when the run is gone or never began.
+     */
+    function findCurrentRunId(job: JobRef): string {
+        const fromParameter = readRunIdParameter(job);
+        if (fromParameter !== undefined) return fromParameter;
+        const deployment = String(runtime.getCurrentScript().deploymentId);
+        const results = query
+            .runSuiteQL({
+                query: `SELECT id FROM ${recordType} WHERE ${fields.job} = ? AND ${fields.deployment} = ? AND ${fields.status} = 'running' ORDER BY id DESC`,
+                params: [job.name, deployment],
+            })
+            .asMappedResults() as { id: string | number }[];
+        return results.length > 0 ? String(results[0].id) : '';
     }
 
     /** The task as NetSuite sees it, or undefined when it can no longer say (an id it has purged). */
@@ -312,53 +352,44 @@ export function createJobRunStore(config: JobRunsConfig): JobRunStore {
             record.delete({ type: recordType, id: runId });
         },
 
-        claimRun({ job, runId, deployment }) {
-            const claimed = runId ?? createRun(job, {}, undefined, null);
-            writeFields(claimed, {
-                [fields.status]: 'running' satisfies JobRunStatus,
-                [fields.stage]: 'input' satisfies JobRunStage,
-                [fields.deployment]: deployment,
-                [fields.startedAt]: new Date(),
-            });
-            return claimed;
-        },
-
-        readInput(runId) {
+        openRun: function openRun<TInput>(job: JobRef): TInput {
+            const deployment = String(runtime.getCurrentScript().deploymentId);
+            // A run started from a page arrives as the script parameter; a scheduled run has none, so it opens its own.
+            const runId = readRunIdParameter(job) ?? createRun(job.name, {}, undefined, null);
             const runRecord = loadRun(runId);
-            if (!runRecord) return {} as never;
-            return parseJsonField(runRecord.getValue({ fieldId: fields.input }), {}) as never;
-        },
-
-        findRunningRunId(job, deployment) {
-            const results = query
-                .runSuiteQL({
-                    query: `SELECT id FROM ${recordType} WHERE ${fields.job} = ? AND ${fields.deployment} = ? AND ${fields.status} = 'running' ORDER BY id DESC`,
-                    params: [job, deployment],
-                })
-                .asMappedResults() as { id: string | number }[];
-            return results.length > 0 ? String(results[0].id) : undefined;
-        },
-
-        finish(runId, { status, result, errors }) {
-            writeFields(runId, {
-                [fields.status]: status,
-                [fields.stage]: 'summarize' satisfies JobRunStage,
-                [fields.stagePercentComplete]: 100,
-                [fields.result]: JSON.stringify(result ?? null),
-                [fields.errors]: JSON.stringify(errors),
-                [fields.finishedAt]: new Date(),
-            });
-        },
-
-        fail(runId, error) {
-            const runRecord = loadRun(runId);
-            if (!runRecord) return;
-            const errors = parseJsonField(runRecord.getValue({ fieldId: fields.errors }), []) as JobRunError[];
-            errors.push(error);
-            runRecord.setValue({ fieldId: fields.status, value: 'failed' satisfies JobRunStatus });
-            runRecord.setValue({ fieldId: fields.errors, value: JSON.stringify(errors) });
-            runRecord.setValue({ fieldId: fields.finishedAt, value: new Date() });
+            if (!runRecord) {
+                log.error('job run missing', { job: job.name, runId, deployment });
+                return {} as TInput;
+            }
+            runRecord.setValue({ fieldId: fields.status, value: 'running' satisfies JobRunStatus });
+            runRecord.setValue({ fieldId: fields.stage, value: 'input' satisfies JobRunStage });
+            runRecord.setValue({ fieldId: fields.deployment, value: deployment });
+            runRecord.setValue({ fieldId: fields.startedAt, value: new Date() });
             runRecord.save({ ignoreMandatoryFields: true });
+            log.audit('job started', { job: job.name, runId, deployment });
+            return parseJsonField(runRecord.getValue({ fieldId: fields.input }), {}) as TInput;
+        },
+
+        currentRunId(job) {
+            return findCurrentRunId(job);
+        },
+
+        closeRun(job, summary, result) {
+            const runId = findCurrentRunId(job);
+            const errors = readCollectedErrors(summary);
+            // Only the input stage decides the run: a map or reduce key that failed is one failure among the results.
+            const status: Extract<JobRunStatus, 'complete' | 'failed'> = summary.inputSummary?.error ? 'failed' : 'complete';
+            if (runId !== '') {
+                writeFields(runId, {
+                    [fields.status]: status,
+                    [fields.stage]: 'summarize' satisfies JobRunStage,
+                    [fields.stagePercentComplete]: 100,
+                    [fields.result]: JSON.stringify(result ?? null),
+                    [fields.errors]: JSON.stringify(errors),
+                    [fields.finishedAt]: new Date(),
+                });
+            }
+            log.audit('job finished', { job: job.name, runId, status, errors: errors.length, seconds: summary.seconds, usage: summary.usage });
         },
     };
 }

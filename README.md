@@ -2,10 +2,10 @@
 
 The API layer for a NetSuite single-page app. The app's server side is SuiteScript; its browser side is a bundle served by a Suitelet. This package holds what sits between them, so a project writes controllers and services and nothing else:
 
-- **`@amerilux/netsuite-api/server`**: declare a controller's endpoints and the script that serves them, expose them as a Restlet or a Suitelet, reject a call with an `ApiError`, call another Suitelet controller from server code, write a Map/Reduce job as stages and start one, and find a File Cabinet file by name.
+- **`@amerilux/netsuite-api/server`**: declare a controller's endpoints and the script that serves them, expose them as a Restlet or a Suitelet, reject a call with an `ApiError`, call another Suitelet controller from server code, keep the record a Map/Reduce job's runs live in, and find a File Cabinet file by name.
 - **`@amerilux/netsuite-api/client`**: a typed browser client per controller, built from the endpoint types.
 - **`@amerilux/netsuite-api/testing`**: stubs for the `N/*` modules and the vitest wiring that routes imports to them.
-- **`netsuite-api generate`**: reads the controllers and the jobs and writes the client's whole view of the backend, one module each and an index re-exporting them, plus the server-side map of scripts and jobs. The client never imports from the server tree.
+- **`netsuite-api generate`**: reads the controllers and the jobs and writes the client's whole view of the backend, one module each and an index re-exporting them, plus the server-side map of scripts and the run record. The client never imports from the server tree.
 - **`@amerilux/netsuite-api`** (the root): the wire itself. The envelope, the endpoint types, `ScriptDeclaration`, `ScriptRef`, `JobRef`, `JobRun`.
 
 The layout it assumes is the one `create-netsuite-project` scaffolds: `api/` (SuiteScript) and `client/` (React) as workspaces.
@@ -200,9 +200,9 @@ export const listRolesForEmployee = (employeeId: number) => userRolesApi.byEmplo
 
 ## Jobs
 
-A job is a Map/Reduce script written as stages, and it is a folder: `api/src/jobs/<name>/<name>.ts` declares it and the stages it is made of sit beside it, one file each. What the wrapper adds is the run: a Map/Reduce answers nothing and cannot be waited on, so every run is a row in a record of the application's own, and that row is what server code and the browser talk about.
+A job is an ordinary Map/Reduce script: its stages are NetSuite's own entry points, written the way any SuiteScript developer writes them. What this package adds is the run, because a Map/Reduce answers nothing and cannot be waited on: every run is a row in a record of the application's own, and that row is what server code and the browser talk about. Three calls are what it costs a job — the run is opened in `getInputData`, found again by a stage that records something against it, and closed in `summarize`.
 
-The definition file is a declaration and a wiring, so what a job is reads at a glance: its ids, its deployments, its parameters, and which stages it has.
+A job is a folder. The file NetSuite loads carries the header and says which stages there are, so what a job is reads at a glance and a developer opens map.ts to see what the map stage does:
 
 ```ts
 // api/src/jobs/closeStaleOrders/closeStaleOrders.ts
@@ -210,54 +210,76 @@ The definition file is a declaration and a wiring, so what a job is reads at a g
  * @NApiVersion 2.1
  * @NScriptType MapReduceScript
  */
-import { defineJob } from '@amerilux/netsuite-api/server';
-import { jobRuns } from '../../scripts.gen';
-import { getInputDataFunction } from './getInputData';
-import { mapFunction } from './map';
-import { summarizeFunction } from './summarize';
 
-export const { getInputData, map, summarize } = defineJob({
-    name: 'closeStaleOrders',
-    scriptId: 'customscript_app_close_stale_mr',
-    deployments: ['customdeploy_app_close_stale_mr', 'customdeploy_app_close_stale_mr_2'],
-    runParameter: 'custscript_app_close_stale_run',
-    parameters: { batchSize: { id: 'custscript_app_close_stale_batch', type: 'integer' } },
-    runs: jobRuns,
-}, {
-    getInputData: getInputDataFunction,
-    map: mapFunction,
-    summarize: summarizeFunction,
-});
+/** Closes the sales orders nobody has touched for long enough. */
+export { getInputData } from './getInputData';
+export { map } from './map';
+export { summarize } from './summarize';
 ```
 
-Each stage is then a file named after the stage NetSuite calls, holding the work and the shapes on its own boundary — open map.ts to see what the map stage does:
+The script's ids are not here: they are written by hand in `netsuite.ts`, beside the job's SDF object, with everything else this application does not own, and the stages pass the job to the run store themselves.
 
-Only the result has to be a shape the client can carry, because it is the only one a browser is handed. The items a run is planned into are the stage's own working types and stay on the server, so they may be built on whatever the server has — a carrier's API request, a customer's configuration — and the generator does not ask them to be carryable.
+```ts
+// netsuite.ts
+export const jobs = {
+    closeStaleOrders: {
+        name: 'closeStaleOrders',
+        scriptId: 'customscript_app_close_stale_mr',
+        deployments: ['customdeploy_app_close_stale_mr', 'customdeploy_app_close_stale_mr_2'],
+        runParameter: 'custscript_app_close_stale_run',
+    },
+} as const;
+```
+
+Each stage is a file named after the stage NetSuite calls, holding the work and the shapes on its own boundary. `getInputData` opens the run, which answers what it was started with:
 
 ```ts
 // api/src/jobs/closeStaleOrders/getInputData.ts
+import type { EntryPoints } from 'N/types';
+import { jobs } from '../../../../netsuite';
+import { openJobRun } from '../../repositories/jobRunRepository';
 import { listStaleOrders, type StaleOrder } from '../../services/staleOrderService';
 
 /** What a run of this job is asked to do. */
-export interface CloseStaleRequest { olderThanDays: number }
+export interface CloseStaleRequest {
+    olderThanDays: number;
+}
 
-export const getInputDataFunction = (input: CloseStaleRequest): StaleOrder[] => listStaleOrders(input.olderThanDays);
+export function getInputData(_context: EntryPoints.MapReduce.getInputDataContext): StaleOrder[] {
+    const input = openJobRun<CloseStaleRequest>(jobs.closeStaleOrders);
+    return listStaleOrders(input.olderThanDays);
+}
 ```
 
-A stage file exports the stage's name plus `Function`, because the definition file exports the plain names NetSuite looks for and the two would collide. A stage file may name a shape another file of the job's folder declares — the value a map stage writes is declared in map.ts and named again in summarize.ts — and the generator reads it there. A stage may also be written inline in the definition file, which suits a job whose stages are a line each — the cleanup job `npm run add:jobs` writes is one.
+`map` and `reduce` are NetSuite's, unchanged: the value arrives as JSON and is written on as JSON. `summarize` builds the result and closes the run with it, which is what a page polling the run is waiting for:
 
-The first parameter of `getInputData` is the run's input and the return type of `summarize` is its result: the generator reads the shapes from those two annotations wherever the stage is written, the way it reads an endpoint's request and response, and copies the shapes the result names into the browser's module whether the stage file declares them or takes them from a service. The values carried between stages are JSON, so each stage annotates what it expects (`values: number[]` on a reduce stage, `summary: JobSummary<Total>` on summarize) and the wrapper hands them back that way. Export the stages the job has, and `summarize` always: the run is closed there. A stage exported without being declared throws when NetSuite calls it, rather than quietly passing values through.
+```ts
+// api/src/jobs/closeStaleOrders/summarize.ts
+export function summarize(context: EntryPoints.MapReduce.summarizeContext): void {
+    const closed: number[] = [];
+    context.output.iterator().each((_key, value) => {
+        closed.push(JSON.parse(value) as number);
+        return true;
+    });
+    closeJobRun<CloseStaleResult>(jobs.closeStaleOrders, context, { closed: closed.length });
+}
+```
 
-Plenty of jobs answer nothing, because the records they write are the point. Such a job declares no `summarize` and still exports it, and the wrapper closes the run for it; one that wants a last word without a result (a notification when the run ends) declares `summarize` with a `void` return. Either way the run's `Result` is `null`, and a page watches `status`, the progress fields and `errors` instead of a result.
+The two calls are the run's contract, and the generator reads it there: the type `openJobRun` is given is what a run is started with, and the type `closeJobRun` is given is what a finished run leaves behind. It copies the shapes the result names into the browser's module, whether the stage file declares them or takes them from a service, and a stage file may name a shape another file of the folder declares — the value a map stage writes is declared in map.ts and named again in summarize.ts. Only the result has to be a shape the client can carry, because it is the only one a browser is handed; the items a run is planned into stay on the server and may be built on whatever the server has.
+
+Everything NetSuite collected is written onto the run by `closeJobRun`, so a map key that failed is on the run as well as in the execution log, and a run whose input stage failed is `failed`. Plenty of jobs leave nothing behind, because the records they write are the point: such a job closes its run with `closeJobRun<null>(job, context, null)`, and a page watches `status`, the progress fields and `errors` instead of a result. A stage that needs the run it belongs to — to stamp a record with it — asks for it with `readJobRunId(job)`.
+
+A job whose runs are scheduled rather than started from a page has no run id to be passed, so `openJobRun` opens one for it; that is all the difference a schedule makes.
 
 Reading a run asks the task about progress as well. `stagePercentComplete` is `getPercentageCompleted()`, which NetSuite documents as the percentage complete of the **stage being processed**, so it counts to 100 once per stage; `itemsProcessed` and `itemsTotal` come from that stage's `getTotal*Count()` and `getPending*Count()` pair and only go up. The record keeps the percent (100 once a run ends) but never the counts, so the counts are null for a run that has ended or whose task id NetSuite has purged — by then the run has the result, which the record did keep.
 
-The store belongs in a repository, because it writes a record and submits a task. Keep it job-agnostic: whatever decides a run should start passes the job and the input. In the folder shape that decision belongs in the job's own folder (`start.ts`), so everything about a job is one place and a controller reaches for it by name.
+The store belongs in a repository, because it writes a record and submits a task: it starts runs, reads them, and is where the three calls a stage makes come from. Keep it job-agnostic — whatever decides a run should start passes the job and the input — and put that decision in the job's own folder (`start.ts`), so everything about a job is one place and a controller reaches for it by name.
 
 ```ts
 // api/src/repositories/jobRunRepository.ts
 import { createJobRunStore } from '@amerilux/netsuite-api/server';
 import type { JobRef, JobRun } from '@amerilux/netsuite-api/server';
+import type { EntryPoints } from 'N/types';
 import { jobRuns } from '../scripts.gen';
 
 const jobRunStore = createJobRunStore(jobRuns);
@@ -265,11 +287,16 @@ const jobRunStore = createJobRunStore(jobRuns);
 export const startJobRun = (job: JobRef, input: unknown): string => jobRunStore.start(job, input);
 export const findJobRun = (runId: string): JobRun | null => jobRunStore.read(runId);
 
-// api/src/services/ordersService.ts
-export const startClosingOldOrders = (olderThanDays: number) => startJobRun(jobs.closeOldOrders, { olderThanDays } satisfies CloseOldOrdersRequest);
+// What a stage calls: open the run in getInputData, close it in summarize, and ask for it in between.
+export const openJobRun = <TInput>(job: JobRef): TInput => jobRunStore.openRun<TInput>(job);
+export const readJobRunId = (job: JobRef): string => jobRunStore.currentRunId(job);
+export const closeJobRun = <TResult>(job: JobRef, context: EntryPoints.MapReduce.summarizeContext, result: TResult): void => jobRunStore.closeRun(job, context, result);
+
+// api/src/jobs/closeStaleOrders/start.ts
+export const startClosingStaleOrders = (olderThanDays: number) => startJobRun(jobs.closeStaleOrders, { olderThanDays } satisfies CloseStaleRequest);
 ```
 
-`start` writes the run, then submits the task to the first deployment that takes it; NetSuite runs one instance of a deployment at a time, so the list in the declaration is how many runs can overlap. When they are all running it throws `ApiError.conflict` (409) and removes the run it had written, because nothing started. A controller endpoint hands the run id to the browser, which polls another endpoint for `read`.
+`start` writes the run, then submits the task to the first deployment that takes it; NetSuite runs one instance of a deployment at a time, so the list in netsuite.ts is how many runs can overlap. When they are all running it throws `ApiError.conflict` (409) and removes the run it had written, because nothing started. A controller endpoint hands the run id to the browser, which polls another endpoint for `read`.
 
 `read` is the reason a dead run does not look like a working one: it takes status, stage and progress from `N/task.checkStatus` as well as the record, so a task NetSuite gave up on is `failed`, and a task that finished without writing a result is `failed` too. `findExpired(days)` and `remove` are what a cleanup job runs on a schedule; run records are not meant to be permanent.
 

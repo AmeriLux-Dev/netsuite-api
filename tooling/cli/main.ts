@@ -44,7 +44,7 @@ function relativeTo(cwd: string, filePath: string): string {
 function describeControllers(plan: ClientGenerationPlan): string[] {
     return [
         ...plan.controllers.map((controller) => ` - ${controller.name} (${controller.kind}): ${controller.endpointCount} endpoint(s)${controller.browser ? '' : ', types only'}`),
-        ...plan.jobs.map((job) => ` - ${job.name} (job): ${job.stages.join(', ')}, ${job.deploymentCount} deployment(s)`),
+        ...plan.jobs.map((job) => ` - ${job.name} (job): ${job.stages.join(', ')}`),
     ];
 }
 

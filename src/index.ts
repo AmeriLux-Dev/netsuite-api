@@ -102,20 +102,6 @@ export interface ScriptRef {
 /** How NetSuite stores a script parameter or a run field, and the type the stages and the page see. */
 export type NetsuiteValueType = 'text' | 'integer' | 'decimal' | 'checkbox' | 'date' | 'select';
 
-/** One script parameter of a job: its id in NetSuite and what NetSuite stores in it. */
-export interface JobParameterDeclaration {
-    id: string;
-    type: NetsuiteValueType;
-}
-
-/** The value of one parameter as the stages see it. A date arrives as the ISO string, never a Date: a stage is not the wire, but a run record is read by both sides. */
-export type JobParameterValue<TType extends NetsuiteValueType> = TType extends 'integer' | 'decimal' ? number : TType extends 'checkbox' ? boolean : string;
-
-/** Every parameter a job declares, by the name the stages use. */
-export type JobParameterValues<TParameters extends Record<string, JobParameterDeclaration>> = {
-    readonly [TName in keyof TParameters]: JobParameterValue<TParameters[TName]['type']>;
-};
-
 /** Where a run is: NetSuite's own stage names, as the run record and the page speak them. */
 export type JobRunStage = 'input' | 'map' | 'shuffle' | 'reduce' | 'summarize';
 
@@ -194,21 +180,28 @@ export interface JobRunQuery {
     limit?: number;
 }
 
-/** One deployed job as server code starts it: `scripts.<job>` in the generated scripts map. */
+/**
+ * One deployed job, as the application writes it down: an entry of the `jobs` object in netsuite.ts,
+ * beside the same ids in the job's SDF object. A stage passes it to open or close its run, and a start
+ * passes it to the run store; nothing generates it, so the ids are written once, by hand, where every
+ * other id this application does not own is written.
+ */
 export interface JobRef {
-    kind: 'mapreduce';
-    /** The job's name, as its declaration gives it and the run record records it. */
-    name: string;
-    scriptId: string;
+    /** The job's name: its folder under api/src/jobs, and what the run record records. */
+    readonly name: string;
+    readonly scriptId: string;
     /**
      * Every deployment the job may run on, in the order they are tried. NetSuite runs one instance of
      * a deployment at a time, so this list is how many runs of the job can overlap.
      */
-    deployments: readonly string[];
+    readonly deployments: readonly string[];
     /** The script parameter the run id is passed in; every stage reads the run back from it. */
-    runParameter: string;
-    /** The job's own script parameters, by the name the stages use. */
-    parameters?: Readonly<Record<string, string>>;
+    readonly runParameter: string;
+    /**
+     * The job's other script parameters, by the name the code reads them by. Nothing here reads them:
+     * a stage asks a repository for the value, the way it asks for anything else NetSuite holds.
+     */
+    readonly parameters?: Readonly<Record<string, string>>;
 }
 
 /** One field an application added to its run record, as netsuite-api.config.json declares it. */

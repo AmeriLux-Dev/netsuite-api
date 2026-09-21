@@ -243,7 +243,7 @@ export const indexEndpoints = defineEndpoints({ list: (): string[] => [] });`),
         })));
         expect(plan.problems).toEqual([
             { filePath: 'api/src/controllers/indexController.ts', message: "type 'Endpoints' is the name the generated module gives the endpoint signatures; call the wire shape something else." },
-            { filePath: 'api/src/controllers/userRolesController.ts', message: "scriptId 'customscript_demo_user_roles' is also declared by api/src/controllers/userController.ts; every controller and every job is its own script." },
+            { filePath: 'api/src/controllers/userRolesController.ts', message: "scriptId 'customscript_demo_user_roles' is also declared by api/src/controllers/userController.ts; every controller is its own script." },
         ]);
         const namedIndex = planClientGeneration(optionsFor(projectFiles({
             [nodePath.join(controllersDirectory, 'indexController.ts')]: restletController('index', 'export const indexEndpoints = defineEndpoints({ list: (): string[] => [] });'),

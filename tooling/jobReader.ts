@@ -1,49 +1,49 @@
 import * as nodePath from 'node:path';
 import ts from 'typescript';
-import { hasExportModifier, readLeadingJsDoc, readScriptTypeHeader, readStringProperty, readTypeImport } from './controllerReader.js';
+import { hasExportModifier, readLeadingJsDoc, readScriptTypeHeader, readTypeImport } from './controllerReader.js';
 import type { CarriedTypeImport, ControllerProblem, InlinedTypeImport, ReadControllerOptions, TypeDeclaration } from './controllerReader.js';
 import { toPosixPath } from './file-system.js';
 
 /**
- * Reads what a job run carries: the script it declares in its defineJob call, the stages it has, and
- * the types on either end of a run. A run's input is the first parameter of getInputData and its result
- * is what summarize returns, so those two annotations are the contract, the way a handler's parameter
- * and return type are a controller's. A parse, not a type check: the ids are string literals and the
- * shapes are written out.
+ * Reads what a job run carries: the stages the script exports, and the types on either end of a run.
+ * A job is an ordinary Map/Reduce script — its stages are NetSuite's own entry points, written in a
+ * file each — so there is nothing here about script ids: those are written by hand in netsuite.ts,
+ * beside the job's SDF object, and the stages pass them to the run store themselves.
  *
- * A job is a folder — `<name>/<name>.ts` declares it — and a stage is either a function written inline
- * or one imported from a file beside it (`./map`), which is where the annotations are then read from. So
- * a developer opens map.ts to see what the map stage does, and the definition file stays a declaration.
+ * A run's contract is where the run is opened and closed: `openJobRun<Request>(jobs.<name>)` on the
+ * first line of getInputData is its input, and `closeJobRun<Result>(...)` in summarize is its result.
+ * A parse, not a type check: the shapes are written out where the stages declare them.
+ *
+ * A job is a folder. `<name>/<name>.ts` carries the script's header and hands NetSuite the stages:
+ *
+ *     export { getInputData } from './getInputData';
+ *     export { map } from './map';
+ *     export { summarize } from './summarize';
+ *
+ * so a developer opens map.ts to see what the map stage does, and the file NetSuite loads says only
+ * which stages there are.
  */
 
-/** The stage names a job may declare, in the order NetSuite calls them. */
+/** The stage names a job may export, in the order NetSuite calls them. */
 export const JOB_STAGE_NAMES = ['getInputData', 'map', 'reduce', 'summarize'] as const;
 export type JobStageName = (typeof JOB_STAGE_NAMES)[number];
 
 /** The script type a job's leading JSDoc must declare. */
 export const JOB_SCRIPT_TYPE_HEADER = 'MapReduceScript';
 
-/** The type the generated job module gives the run's input, and the one it gives the result. */
+/** The type the generated job module gives the run's result. */
 export const GENERATED_JOB_RESULT_TYPE_NAME = 'Result';
+
+/**
+ * The calls a run is opened and closed with, which is where a run's input and result are written
+ * down. The repository `npm run add:jobs` writes exports them under these names; a project that
+ * renames them hides its runs' shapes from the generator, so the names are part of the convention.
+ */
+export const RUN_OPEN_FUNCTION_NAME = 'openJobRun';
+export const RUN_CLOSE_FUNCTION_NAME = 'closeJobRun';
 
 const jobFileNamePattern = /^([a-z][A-Za-z0-9]*)\.ts$/;
 const jobFolderNamePattern = /^[a-z][A-Za-z0-9]*$/;
-const netsuiteValueTypes = ['text', 'integer', 'decimal', 'checkbox', 'date', 'select'] as const;
-
-export interface JobParameterContract {
-    /** The name the stages read it by. */
-    name: string;
-    id: string;
-    type: (typeof netsuiteValueTypes)[number];
-}
-
-/** The script a job declares, as read off its defineJob call. */
-export interface DeclaredJob {
-    scriptId: string;
-    deployments: string[];
-    runParameter: string;
-    parameters: JobParameterContract[];
-}
 
 /**
  * A file of the job's own folder the reader had to read: a stage, or a file a stage takes a shape from. What
@@ -57,31 +57,28 @@ export interface JobFolderFile {
     carriedTypeImports: CarriedTypeImport[];
 }
 
-/** What a job's reader needs beyond a controller's: the files its stages are imported from. */
+/** What a job's reader needs beyond a controller's: the files its stages are exported from. */
 export interface ReadJobOptions extends ReadControllerOptions {
     /**
-     * Reads a file a stage is imported from, the specifier resolved against the job's own folder, or
-     * undefined when there is no such file. Without it, only inline stages can be read.
+     * Reads a file a stage comes from, the specifier resolved against the job's own folder, or
+     * undefined when there is no such file.
      */
     readStageFile?(specifier: string): { filePath: string; source: string } | undefined;
 }
 
 export interface JobContract {
-    /** The job's name: `closeStaleOrders` for closeStaleOrders.ts, matching `name` in its declaration. */
+    /** The job's name: `closeStaleOrders` for closeStaleOrders/closeStaleOrders.ts, and what netsuite.ts calls it. */
     name: string;
     filePath: string;
-    script: DeclaredJob;
     carriedTypeImports: CarriedTypeImport[];
     inlinedTypeImports: InlinedTypeImport[];
     typeDeclarations: TypeDeclaration[];
-    /** The type of getInputData's first parameter, or undefined when a run takes no input. */
+    /** The type openJobRun is given in getInputData, or undefined when a run carries no input. */
     inputType?: string;
-    /** What summarize returns, or undefined when the job has no summarize stage of its own. */
+    /** The type closeJobRun is given in summarize: what a finished run leaves behind. */
     resultType?: string;
-    /** The stages the job declares. */
+    /** The stages the script exports, in the order NetSuite calls them. */
     stages: JobStageName[];
-    /** The stages the file exports as NetSuite entry points. */
-    exportedStages: string[];
     /** The files of the job's folder that were read, in that order: its stages, and whatever they name. */
     folderFiles: JobFolderFile[];
 }
@@ -96,102 +93,9 @@ export function readJobFolderName(folderName: string): string | undefined {
     return jobFolderNamePattern.test(folderName) ? folderName : undefined;
 }
 
-/** The file that declares the job of a folder: the folder's own name again, so the file is unique to open and to search for. */
+/** The file NetSuite loads for a job: the folder's own name again, so the file is unique to open and to search for. */
 export function jobDefinitionFileName(jobName: string): string {
     return `${jobName}.ts`;
-}
-
-/** `export const { getInputData, map, summarize } = defineJob(...)`: the call, and the names it exports. */
-function findDefineJobCall(statement: ts.VariableStatement): { call: ts.CallExpression; exportedStages: string[]; destructured: boolean } | undefined {
-    for (const declaration of statement.declarationList.declarations) {
-        const initializer = declaration.initializer;
-        if (!initializer || !ts.isCallExpression(initializer) || !ts.isIdentifier(initializer.expression) || initializer.expression.text !== 'defineJob') continue;
-        if (!ts.isObjectBindingPattern(declaration.name)) return { call: initializer, exportedStages: [], destructured: false };
-        const exportedStages = declaration.name.elements
-            .map((element) => (ts.isIdentifier(element.name) ? element.name.text : undefined))
-            .filter((exported): exported is string => exported !== undefined);
-        return { call: initializer, exportedStages, destructured: true };
-    }
-    return undefined;
-}
-
-function readStringArrayProperty(literal: ts.ObjectLiteralExpression, propertyName: string): string[] | undefined {
-    for (const property of literal.properties) {
-        if (!ts.isPropertyAssignment(property) || !ts.isIdentifier(property.name) || property.name.text !== propertyName) continue;
-        if (!ts.isArrayLiteralExpression(property.initializer)) return undefined;
-        const values = property.initializer.elements.map((element) => (ts.isStringLiteral(element) ? element.text : undefined));
-        return values.every((value): value is string => value !== undefined) ? values : undefined;
-    }
-    return undefined;
-}
-
-function hasProperty(literal: ts.ObjectLiteralExpression, propertyName: string): boolean {
-    return literal.properties.some((property) => ts.isPropertyAssignment(property) && ts.isIdentifier(property.name) && property.name.text === propertyName);
-}
-
-function readObjectProperty(literal: ts.ObjectLiteralExpression, propertyName: string): ts.ObjectLiteralExpression | undefined {
-    for (const property of literal.properties) {
-        if (ts.isPropertyAssignment(property) && ts.isIdentifier(property.name) && property.name.text === propertyName && ts.isObjectLiteralExpression(property.initializer)) {
-            return property.initializer;
-        }
-    }
-    return undefined;
-}
-
-function readParameters(declaration: ts.ObjectLiteralExpression, filePath: string): { parameters: JobParameterContract[]; problems: ControllerProblem[] } {
-    const problems: ControllerProblem[] = [];
-    const parameters: JobParameterContract[] = [];
-    const literal = readObjectProperty(declaration, 'parameters');
-    if (!literal) {
-        if (hasProperty(declaration, 'parameters')) problems.push({ filePath, message: "'parameters' must be an object literal of { id, type } written inline; the generator reads the ids from it." });
-        return { parameters, problems };
-    }
-    for (const property of literal.properties) {
-        if (!ts.isPropertyAssignment(property) || !ts.isIdentifier(property.name)) {
-            problems.push({ filePath, message: 'every script parameter is named by a plain identifier and declared as { id, type }.' });
-            continue;
-        }
-        const name = property.name.text;
-        if (!ts.isObjectLiteralExpression(property.initializer)) {
-            problems.push({ filePath, message: `parameter '${name}' must be written as { id: 'custscript_...', type: '...' }.` });
-            continue;
-        }
-        const id = readStringProperty(property.initializer, 'id');
-        const type = readStringProperty(property.initializer, 'type');
-        if (id === undefined) problems.push({ filePath, message: `parameter '${name}' needs 'id' as a string literal: the script parameter's id in NetSuite.` });
-        if (type === undefined || !netsuiteValueTypes.includes(type as JobParameterContract['type'])) {
-            problems.push({ filePath, message: `parameter '${name}' needs 'type' as one of ${netsuiteValueTypes.map((value) => `'${value}'`).join(', ')}.` });
-            continue;
-        }
-        if (id !== undefined) parameters.push({ name, id, type: type as JobParameterContract['type'] });
-    }
-    return { parameters, problems };
-}
-
-function readJobDeclaration(declaration: ts.ObjectLiteralExpression, jobName: string, filePath: string): { script?: DeclaredJob; problems: ControllerProblem[] } {
-    const problems: ControllerProblem[] = [];
-    const name = readStringProperty(declaration, 'name');
-    const scriptId = readStringProperty(declaration, 'scriptId');
-    const runParameter = readStringProperty(declaration, 'runParameter');
-    const deployments = readStringArrayProperty(declaration, 'deployments');
-    if (name === undefined) problems.push({ filePath, message: "the job declaration needs 'name' as a string literal; the generator reads it from the source." });
-    else if (name !== jobName) problems.push({ filePath, message: `the job declaration says name: '${name}' but the job is ${jobName}; the name is the job's folder and file name.` });
-    if (scriptId === undefined) problems.push({ filePath, message: "the job declaration needs 'scriptId' as a string literal." });
-    if (runParameter === undefined) {
-        problems.push({ filePath, message: "the job declaration needs 'runParameter' as a string literal: the script parameter the run id is passed in." });
-    }
-    if (deployments === undefined) {
-        problems.push({ filePath, message: "the job declaration needs 'deployments' as an array of string literals: every deployment a run may be started on." });
-    } else if (deployments.length === 0) {
-        problems.push({ filePath, message: "'deployments' is empty; a job needs at least one deployment to run on." });
-    }
-    if (!hasProperty(declaration, 'runs')) {
-        problems.push({ filePath, message: "the job declaration needs 'runs: jobRuns', the run record from the generated scripts map; the stages read the run through it." });
-    }
-    const readParametersResult = readParameters(declaration, filePath);
-    problems.push(...readParametersResult.problems);
-    if (problems.length > 0 || scriptId === undefined || runParameter === undefined || deployments === undefined) return { problems };
-    return { script: { scriptId, deployments, runParameter, parameters: readParametersResult.parameters }, problems };
 }
 
 interface FileTypes {
@@ -202,8 +106,8 @@ interface FileTypes {
 }
 
 /**
- * The exported type declarations of a file and the type imports it carries, for a job's definition file
- * or for one of its stage files: both end up in the browser's module, so both are read the same way.
+ * The exported type declarations of a file and the type imports it carries, for the file NetSuite
+ * loads or for one of the stages: both end up in the browser's module, so both are read the same way.
  */
 function readFileTypes(sourceFile: ts.SourceFile, filePath: string, options: ReadControllerOptions, folderFiles?: JobFolderFiles): FileTypes {
     const declarations: TypeDeclaration[] = [];
@@ -212,6 +116,8 @@ function readFileTypes(sourceFile: ts.SourceFile, filePath: string, options: Rea
     const problems: ControllerProblem[] = [];
     for (const statement of sourceFile.statements) {
         if (ts.isImportDeclaration(statement)) {
+            // NetSuite's own types: a stage is an entry point, so it is annotated with them, and none of them crosses to the browser.
+            if (ts.isStringLiteral(statement.moduleSpecifier) && statement.moduleSpecifier.text.startsWith('N/')) continue;
             const result = readTypeImport(statement, filePath, options);
             if (result.read?.kind === 'carried') carriedTypeImports.push(result.read.typeImport);
             else if (result.read?.kind === 'inlined') inlinedTypeImports.push(result.read.typeImport);
@@ -281,24 +187,9 @@ function createJobFolderFiles(options: ReadJobOptions): JobFolderFiles {
     return folderFiles;
 }
 
-/** `import { mapFunction } from './map'`: every value imported by name, by the name this file calls it. */
-function readValueImports(sourceFile: ts.SourceFile): Map<string, { specifier: string; importedName: string }> {
-    const valueImports = new Map<string, { specifier: string; importedName: string }>();
-    for (const statement of sourceFile.statements) {
-        if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
-        const clause = statement.importClause;
-        if (!clause || clause.isTypeOnly || !clause.namedBindings || !ts.isNamedImports(clause.namedBindings)) continue;
-        for (const element of clause.namedBindings.elements) {
-            if (element.isTypeOnly) continue;
-            valueImports.set(element.name.text, { specifier: statement.moduleSpecifier.text, importedName: (element.propertyName ?? element.name).text });
-        }
-    }
-    return valueImports;
-}
+type StageHandler = ts.ArrowFunction | ts.FunctionExpression | ts.FunctionDeclaration;
 
-type StageHandler = ts.ArrowFunction | ts.FunctionExpression | ts.MethodDeclaration | ts.FunctionDeclaration;
-
-/** The exported function of that name in a stage file: `export const mapFunction = …` or `export function mapFunction…`. */
+/** The exported function of that name in a stage file: `export function map…` or `export const map = …`. */
 function findExportedFunction(sourceFile: ts.SourceFile, name: string): StageHandler | undefined {
     for (const statement of sourceFile.statements) {
         if (ts.isFunctionDeclaration(statement) && hasExportModifier(statement) && statement.name?.text === name) return statement;
@@ -312,6 +203,31 @@ function findExportedFunction(sourceFile: ts.SourceFile, name: string): StageHan
     return undefined;
 }
 
+/** The type a call was given, written out: `openJobRun<ApproveRequest>(…)` answers `ApproveRequest`. */
+function findCallTypeArgument(sourceFile: ts.SourceFile, functionName: string): { found: boolean; typeText?: string } {
+    let found = false;
+    let typeText: string | undefined;
+    const visit = (node: ts.Node): void => {
+        if (found && typeText !== undefined) return;
+        if (ts.isCallExpression(node)) {
+            const called = ts.isIdentifier(node.expression) ? node.expression.text : undefined;
+            if (called === functionName) {
+                found = true;
+                const typeArgument = node.typeArguments?.[0];
+                if (typeArgument && typeText === undefined) typeText = typeArgument.getText(sourceFile);
+            }
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+    return { found, typeText };
+}
+
+/** NetSuite's context for one stage, as a stage file annotates it: `EntryPoints.MapReduce.mapContext`. */
+function isStageContextType(typeText: string | undefined, stage: JobStageName): boolean {
+    return typeText !== undefined && typeText.replace(/\s/g, '').endsWith(`MapReduce.${stage}Context`);
+}
+
 interface ReadStagesResult {
     stages: JobStageName[];
     inputType?: string;
@@ -319,81 +235,96 @@ interface ReadStagesResult {
     problems: ControllerProblem[];
 }
 
-function readStages(literal: ts.ObjectLiteralExpression, filePath: string, sourceFile: ts.SourceFile, folderFiles: JobFolderFiles): ReadStagesResult {
+/**
+ * The stages the script hands NetSuite, each read in the file it comes from: what it is annotated
+ * with, and — for the two stages a run is opened and closed in — the shapes on either end of the run.
+ */
+function readStages(sourceFile: ts.SourceFile, filePath: string, jobName: string, folderFiles: JobFolderFiles): ReadStagesResult {
     const problems: ControllerProblem[] = [];
     const stages: JobStageName[] = [];
-    const valueImports = readValueImports(sourceFile);
     let inputType: string | undefined;
     let resultType: string | undefined;
 
-    /** The function a stage names, in the file it is imported from: `getInputData: getInputDataFunction`. */
-    function findReferencedStage(stageName: string, referenced: string): { handler: StageHandler; sourceFile: ts.SourceFile; filePath: string } | undefined {
-        const imported = valueImports.get(referenced);
-        if (!imported) {
-            problems.push({ filePath, message: `stage '${stageName}' names '${referenced}', which this file does not import; a stage is written inline or imported from a file beside the job.` });
-            return undefined;
-        }
-        if (!imported.specifier.startsWith('./') && !imported.specifier.startsWith('../')) {
-            problems.push({ filePath, message: `stage '${stageName}' comes from '${imported.specifier}'; a stage is imported from a file beside the job, such as './${stageName}'.` });
-            return undefined;
-        }
-        const stageFile = folderFiles.read(imported.specifier);
-        if (!stageFile) {
-            problems.push({ filePath, message: `stage '${stageName}' is imported from '${imported.specifier}', which is not a file beside the job the generator can read.` });
-            return undefined;
-        }
-        const handler = findExportedFunction(stageFile.sourceFile, imported.importedName);
-        if (!handler) {
-            problems.push({ filePath: stageFile.filePath, message: `'${imported.importedName}' is not exported from here as a function, and stage '${stageName}' names it; its annotations are the run's contract.` });
-            return undefined;
-        }
-        return { handler, sourceFile: stageFile.sourceFile, filePath: stageFile.filePath };
-    }
-
-    for (const property of literal.properties) {
-        const stageName = property.name && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) ? property.name.text : undefined;
-        if (stageName === undefined || !JOB_STAGE_NAMES.includes(stageName as JobStageName)) {
-            problems.push({ filePath, message: `'${stageName ?? 'a stage'}' is not a stage; a job declares ${JOB_STAGE_NAMES.join(', ')}.` });
+    for (const statement of sourceFile.statements) {
+        if (!ts.isExportDeclaration(statement)) continue;
+        if (!statement.moduleSpecifier || !ts.isStringLiteral(statement.moduleSpecifier)) {
+            problems.push({ filePath, message: "a stage is exported from the file it lives in: `export { map } from './map'`." });
             continue;
         }
-        // Where the annotations are read from: the definition file for an inline stage, the stage's own file otherwise.
-        let handler: StageHandler | undefined;
-        let annotatedIn = { sourceFile, filePath };
-        if (ts.isMethodDeclaration(property)) handler = property;
-        else if (ts.isPropertyAssignment(property) && (ts.isArrowFunction(property.initializer) || ts.isFunctionExpression(property.initializer))) handler = property.initializer;
-        else {
-            const referenced = ts.isShorthandPropertyAssignment(property)
-                ? property.name.text
-                : ts.isPropertyAssignment(property) && ts.isIdentifier(property.initializer)
-                  ? property.initializer.text
-                  : undefined;
-            if (referenced === undefined) {
-                problems.push({ filePath, message: `stage '${stageName}' is neither a function nor the name of one; write it inline or import it from a file beside the job.` });
+        const specifier = statement.moduleSpecifier.text;
+        if (!statement.exportClause || !ts.isNamedExports(statement.exportClause)) {
+            problems.push({ filePath, message: `'export * from ${specifier}' says nothing about which stages there are; export them by name.` });
+            continue;
+        }
+        if (!isRelativeSpecifier(specifier)) {
+            problems.push({ filePath, message: `a stage comes from a file beside the job, such as './map'; '${specifier}' is somewhere else.` });
+            continue;
+        }
+        const stageFile = folderFiles.read(specifier);
+        if (!stageFile) {
+            problems.push({ filePath, message: `there is no '${specifier}' beside the job for the generator to read.` });
+            continue;
+        }
+        for (const element of statement.exportClause.elements) {
+            const stageName = element.name.text;
+            if (!JOB_STAGE_NAMES.includes(stageName as JobStageName)) {
+                problems.push({ filePath, message: `NetSuite has no entry point called '${stageName}'; a job exports ${JOB_STAGE_NAMES.join(', ')}.` });
                 continue;
             }
-            const found = findReferencedStage(stageName, referenced);
-            if (!found) continue;
-            handler = found.handler;
-            annotatedIn = { sourceFile: found.sourceFile, filePath: found.filePath };
-        }
-        stages.push(stageName as JobStageName);
-        if (stageName === 'getInputData') {
-            const parameter = handler.parameters[0];
-            if (parameter && !parameter.type) {
-                problems.push({ filePath: annotatedIn.filePath, message: "getInputData has no type on its first parameter; a run's input shape is read from it." });
+            const stage = stageName as JobStageName;
+            if (stages.includes(stage)) {
+                problems.push({ filePath, message: `'${stage}' is exported twice; NetSuite calls one function per stage.` });
+                continue;
             }
-            inputType = parameter?.type?.getText(annotatedIn.sourceFile);
-        }
-        if (stageName === 'summarize') {
-            if (!handler.type) problems.push({ filePath: annotatedIn.filePath, message: "summarize has no return type annotation; a run's result shape is read from it." });
-            resultType = handler.type?.getText(annotatedIn.sourceFile);
+            const localName = (element.propertyName ?? element.name).text;
+            const handler = findExportedFunction(stageFile.sourceFile, localName);
+            if (!handler) {
+                problems.push({ filePath: stageFile.filePath, message: `'${localName}' is not exported from here as a function, and ${jobName} hands it to NetSuite as its ${stage} stage.` });
+                continue;
+            }
+            stages.push(stage);
+            const contextType = handler.parameters[0]?.type?.getText(stageFile.sourceFile);
+            if (!isStageContextType(contextType, stage)) {
+                problems.push({
+                    filePath: stageFile.filePath,
+                    message: `${stage} takes NetSuite's own context: \`(context: EntryPoints.MapReduce.${stage}Context)\`, the type it is called with.`,
+                });
+            }
+            if (stage === 'getInputData') {
+                const opened = findCallTypeArgument(stageFile.sourceFile, RUN_OPEN_FUNCTION_NAME);
+                if (!opened.found) {
+                    problems.push({
+                        filePath: stageFile.filePath,
+                        message: `getInputData opens the run it belongs to: \`${RUN_OPEN_FUNCTION_NAME}<Request>(jobs.${jobName})\`. Without it the run is never claimed and the page follows a run that says nothing.`,
+                    });
+                }
+                inputType = opened.typeText;
+            }
+            if (stage === 'summarize') {
+                const closed = findCallTypeArgument(stageFile.sourceFile, RUN_CLOSE_FUNCTION_NAME);
+                if (!closed.found) {
+                    problems.push({
+                        filePath: stageFile.filePath,
+                        message: `summarize closes the run: \`${RUN_CLOSE_FUNCTION_NAME}<Result>(jobs.${jobName}, context, result)\`. Without it the run never ends and the page polls a finished job.`,
+                    });
+                } else if (closed.typeText === undefined) {
+                    problems.push({
+                        filePath: stageFile.filePath,
+                        message: `${RUN_CLOSE_FUNCTION_NAME} has no type on it; a run's result shape is read from it, so write it out: \`${RUN_CLOSE_FUNCTION_NAME}<Result>(…)\`, or \`<null>\` for a run that leaves nothing.`,
+                    });
+                }
+                resultType = closed.typeText;
+            }
         }
     }
-    if (!stages.includes('getInputData')) problems.push({ filePath, message: 'a job declares getInputData; it is what NetSuite asks for the run\'s work.' });
+
+    if (!stages.includes('getInputData')) problems.push({ filePath, message: 'a job exports getInputData; it is what NetSuite asks for the run\'s work.' });
     if (!stages.includes('map') && !stages.includes('reduce')) {
-        problems.push({ filePath, message: 'a job declares a map stage, a reduce stage, or both; NetSuite has nothing to run otherwise.' });
+        problems.push({ filePath, message: 'a job exports a map stage, a reduce stage, or both; NetSuite has nothing to run otherwise.' });
     }
-    return { stages, inputType, resultType, problems };
+    // The run is closed in summarize, so a job that leaves it out would leave every run of it looking unfinished.
+    if (!stages.includes('summarize')) problems.push({ filePath, message: 'every job exports summarize: it is where the run is closed and its result written.' });
+    return { stages: JOB_STAGE_NAMES.filter((stage) => stages.includes(stage)), inputType, resultType, problems };
 }
 
 export function readJobContract(filePath: string, source: string, options: ReadJobOptions): JobReadResult {
@@ -401,7 +332,7 @@ export function readJobContract(filePath: string, source: string, options: ReadJ
     const posixPath = toPosixPath(filePath);
     const fileName = nodePath.basename(posixPath);
     const nameMatch = jobFileNamePattern.exec(fileName);
-    if (!nameMatch) return { problems: [{ filePath, message: 'a job is declared in <name>.ts, with <name> in camelCase; nothing else declares a job.' }] };
+    if (!nameMatch) return { problems: [{ filePath, message: 'a job is the file <name>.ts of a folder of that name, with <name> in camelCase; nothing else is a job.' }] };
     const name = nameMatch[1];
     const folderName = nodePath.basename(nodePath.dirname(posixPath));
     if (folderName !== name) {
@@ -417,69 +348,23 @@ export function readJobContract(filePath: string, source: string, options: ReadJ
     const folderFiles = createJobFolderFiles(options);
     const fileTypes = readFileTypes(sourceFile, filePath, options, folderFiles);
     problems.push(...fileTypes.problems);
-    const { carriedTypeImports, inlinedTypeImports, declarations: typeDeclarations } = fileTypes;
-    let contract: Omit<JobContract, 'carriedTypeImports' | 'inlinedTypeImports' | 'typeDeclarations'> | undefined;
+    const stages = readStages(sourceFile, filePath, name, folderFiles);
+    problems.push(...stages.problems);
+    problems.push(...folderFiles.problems);
+    if (problems.length > 0) return { problems };
 
-    for (const statement of sourceFile.statements) {
-        if (!ts.isVariableStatement(statement)) continue;
-        const found = findDefineJobCall(statement);
-        if (!found) continue;
-        if (contract) {
-            problems.push({ filePath, message: 'a job file has one defineJob call; a second one is a second script.' });
-            continue;
-        }
-        if (!hasExportModifier(statement) || !found.destructured) {
-            problems.push({ filePath, message: "the stages are exported from the call: `export const { getInputData, map, summarize } = defineJob({ ... }, { ... })`; NetSuite looks for those exports." });
-        }
-        const [declarationArgument, stagesArgument] = found.call.arguments;
-        if (!declarationArgument || !ts.isObjectLiteralExpression(declarationArgument)) {
-            problems.push({ filePath, message: 'defineJob takes the job declaration as an object literal written inline.' });
-            continue;
-        }
-        if (!stagesArgument || !ts.isObjectLiteralExpression(stagesArgument)) {
-            problems.push({ filePath, message: 'defineJob takes the stages as an object literal written inline, each stage a function with its types annotated.' });
-            continue;
-        }
-        const declared = readJobDeclaration(declarationArgument, name, filePath);
-        problems.push(...declared.problems);
-        const stages = readStages(stagesArgument, filePath, sourceFile, folderFiles);
-        problems.push(...stages.problems);
-        for (const exported of found.exportedStages) {
-            if (!JOB_STAGE_NAMES.includes(exported as JobStageName)) {
-                problems.push({ filePath, message: `'${exported}' is not a stage, so NetSuite has no entry point by that name; export ${JOB_STAGE_NAMES.join(', ')}.` });
-            } else if (exported !== 'summarize' && !stages.stages.includes(exported as JobStageName)) {
-                problems.push({ filePath, message: `'${exported}' is exported but not declared; a stage exported without a declaration throws when NetSuite calls it.` });
-            }
-        }
-        for (const stage of stages.stages) {
-            if (!found.exportedStages.includes(stage)) {
-                problems.push({ filePath, message: `stage '${stage}' is declared but not exported; NetSuite only runs the stages the file exports.` });
-            }
-        }
-        // The run is closed in summarize, so a job that leaves it out would leave every run of it looking unfinished.
-        if (!found.exportedStages.includes('summarize')) {
-            problems.push({ filePath, message: 'every job exports summarize, declared or not: it is where the run is closed and its result written.' });
-        }
-        if (!declared.script) continue;
-        contract = {
+    return {
+        contract: {
             name,
             filePath,
-            script: declared.script,
+            carriedTypeImports: fileTypes.carriedTypeImports,
+            inlinedTypeImports: fileTypes.inlinedTypeImports,
+            typeDeclarations: fileTypes.declarations,
             inputType: stages.inputType,
             resultType: stages.resultType,
             stages: stages.stages,
-            exportedStages: found.exportedStages,
             folderFiles: folderFiles.collected,
-        };
-    }
-
-    problems.push(...folderFiles.problems);
-    if (!contract) {
-        if (problems.length === 0) {
-            problems.push({ filePath, message: 'must declare its script: `export const { getInputData, map, summarize } = defineJob({ name, scriptId, deployments, runParameter, runs }, { ... })`.' });
-        }
-        return { problems };
-    }
-    if (problems.length > 0) return { problems };
-    return { contract: { ...contract, carriedTypeImports, inlinedTypeImports, typeDeclarations }, problems };
+        },
+        problems,
+    };
 }

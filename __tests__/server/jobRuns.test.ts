@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as query from 'N/query';
 import * as record from 'N/record';
+import * as runtime from 'N/runtime';
 import * as task from 'N/task';
 import { ApiError, createJobRunStore } from '../../src/server/index.js';
 import type { JobRef, JobRunsConfig } from '../../src/server/index.js';
+import { summarizeContextFor } from '../../src/testing/jobs.js';
 
 // The N/* stubs this package ships, named once: vi.mocked types them as the mocks they are.
 const createRecord = vi.mocked(record.create);
@@ -33,13 +35,26 @@ const jobRuns: JobRunsConfig = {
     extraFields: { customerId: { id: 'custrecord_demo_jr_customer', type: 'integer' } },
 };
 
+/** A job as netsuite.ts writes it down, which is the only place its ids live. */
 const closeStaleOrders: JobRef = {
-    kind: 'mapreduce',
     name: 'closeStaleOrders',
     scriptId: 'customscript_demo_close_stale_mr',
     deployments: ['customdeploy_demo_close_stale_mr', 'customdeploy_demo_close_stale_mr_2'],
     runParameter: 'custscript_demo_close_stale_run',
 };
+
+/**
+ * The script a stage is running as: the deployment it is on, and the run id it was passed, which a
+ * scheduled run does not have. This is all a stage knows about its run before it asks the store.
+ */
+function runningOn(deployment: string, runId?: string): void {
+    vi.mocked(runtime.getCurrentScript).mockReturnValue({
+        id: 'customscript_demo_close_stale_mr',
+        deploymentId: deployment,
+        getParameter: ({ name }: { name: string }) => (name === 'custscript_demo_close_stale_run' ? (runId ?? '') : ''),
+        getRemainingUsage: () => 1000,
+    } as never);
+}
 
 /** The rows in the account, by internal id: every record.create and record.load in a test goes through this. */
 const rows = new Map<string, Record<string, unknown>>();
@@ -267,7 +282,8 @@ describe('read', () => {
         const store = createJobRunStore(jobRuns);
         createTask.mockReturnValue({ submit: vi.fn(() => 'TASK_4') } as never);
         const runId = store.start(closeStaleOrders, {}, { extra: { customerId: 7 } });
-        store.finish(runId, { status: 'complete', result: { closed: 3 }, errors: [{ stage: 'map', key: '12', message: 'locked' }] });
+        runningOn('customdeploy_demo_close_stale_mr', runId);
+        store.closeRun(closeStaleOrders, summarizeContextFor({ mapErrors: [{ key: '12', error: 'locked' }] }), { closed: 3 });
         checkStatus.mockClear();
 
         const run = store.read<{ closed: number }, { customerId: number }>(runId);
@@ -323,33 +339,66 @@ describe('findRuns', () => {
     });
 });
 
-describe('the stages side', () => {
-    it('opens a run of its own for a scheduled start and finds it again by deployment', () => {
-        const store = createJobRunStore(jobRuns);
-
-        const runId = store.claimRun({ job: 'closeStaleOrders', deployment: 'customdeploy_demo_close_stale_mr' });
-
-        expect(store.readInput(runId)).toEqual({});
-        expect((rows.get(runId) as Record<string, unknown>).custrecord_demo_jr_status).toBe('running');
-        runSuiteQL.mockReturnValue({ asMappedResults: () => [{ id: runId }] } as never);
-        expect(store.findRunningRunId('closeStaleOrders', 'customdeploy_demo_close_stale_mr')).toBe(runId);
-    });
-
-    it('keeps the run the parameter named, rather than opening another', () => {
+describe('the calls a stage makes', () => {
+    it('opens the run the script parameter names and answers what it was started with', () => {
         const store = createJobRunStore(jobRuns);
         createTask.mockReturnValue({ submit: vi.fn(() => 'TASK_5') } as never);
         const runId = store.start(closeStaleOrders, { olderThanDays: 5 });
+        runningOn('customdeploy_demo_close_stale_mr', runId);
 
-        expect(store.claimRun({ job: 'closeStaleOrders', runId, deployment: 'customdeploy_demo_close_stale_mr' })).toBe(runId);
+        const input = store.openRun<{ olderThanDays: number }>(closeStaleOrders);
+
+        expect(input).toEqual({ olderThanDays: 5 });
         expect(rows.size).toBe(1);
-        expect(store.readInput(runId)).toEqual({ olderThanDays: 5 });
+        expect((rows.get(runId) as Record<string, unknown>).custrecord_demo_jr_status).toBe('running');
+        expect((rows.get(runId) as Record<string, unknown>).custrecord_demo_jr_deploy).toBe('customdeploy_demo_close_stale_mr');
     });
 
-    it('marks a run failed with the error a stage threw', () => {
+    it('opens a run of its own for a scheduled start, which has no parameter to read', () => {
         const store = createJobRunStore(jobRuns);
-        const runId = store.claimRun({ job: 'closeStaleOrders', deployment: 'customdeploy_demo_close_stale_mr' });
+        runningOn('customdeploy_demo_close_stale_mr');
 
-        store.fail(runId, { stage: 'input', message: 'the query would not run' });
+        expect(store.openRun(closeStaleOrders)).toEqual({});
+        expect(rows.size).toBe(1);
+        const [runId] = [...rows.keys()];
+        expect((rows.get(runId) as Record<string, unknown>).custrecord_demo_jr_job).toBe('closeStaleOrders');
+    });
+
+    it('finds the run a later stage belongs to by the deployment it is running on', () => {
+        const store = createJobRunStore(jobRuns);
+        runningOn('customdeploy_demo_close_stale_mr');
+        store.openRun(closeStaleOrders);
+        const [runId] = [...rows.keys()];
+        runSuiteQL.mockReturnValue({ asMappedResults: () => [{ id: runId }] } as never);
+
+        expect(store.currentRunId(closeStaleOrders)).toBe(runId);
+        const sent = runSuiteQL.mock.calls[0][0] as { params: unknown[] };
+        expect(sent.params).toEqual(['closeStaleOrders', 'customdeploy_demo_close_stale_mr']);
+    });
+
+    it('closes the run with the result summarize built and everything NetSuite collected', () => {
+        const store = createJobRunStore(jobRuns);
+        createTask.mockReturnValue({ submit: vi.fn(() => 'TASK_6') } as never);
+        const runId = store.start(closeStaleOrders, {}, { extra: { customerId: 7 } });
+        runningOn('customdeploy_demo_close_stale_mr', runId);
+
+        store.closeRun(closeStaleOrders, summarizeContextFor({ mapErrors: [{ key: '12', error: 'locked' }], seconds: 12 }), { closed: 3 });
+
+        checkStatus.mockClear();
+        const run = store.read<{ closed: number }, { customerId: number }>(runId);
+        expect(checkStatus).not.toHaveBeenCalled();
+        expect(run).toMatchObject({ status: 'complete', stagePercentComplete: 100, result: { closed: 3 }, extra: { customerId: 7 } });
+        expect(run?.errors).toEqual([{ stage: 'map', key: '12', message: 'locked' }]);
+        expect(run?.finishedAt).not.toBeNull();
+    });
+
+    it('closes a run whose input stage failed as failed, with what NetSuite said', () => {
+        const store = createJobRunStore(jobRuns);
+        createTask.mockReturnValue({ submit: vi.fn(() => 'TASK_7') } as never);
+        const runId = store.start(closeStaleOrders, {});
+        runningOn('customdeploy_demo_close_stale_mr', runId);
+
+        store.closeRun(closeStaleOrders, summarizeContextFor({ inputError: 'the query would not run' }), null);
 
         expect(store.read(runId)).toMatchObject({ status: 'failed', errors: [{ stage: 'input', message: 'the query would not run' }] });
     });

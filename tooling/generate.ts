@@ -42,10 +42,8 @@ export interface PlannedController {
 export interface PlannedJob {
     name: string;
     filePath: string;
-    /** The stages the job declares, in the order NetSuite calls them. */
+    /** The stages the job hands NetSuite, in the order NetSuite calls them. */
     stages: string[];
-    /** How many deployments a run can be started on: how many runs of the job can overlap. */
-    deploymentCount: number;
 }
 
 export interface PlannedFile {
@@ -81,22 +79,18 @@ function relativeLabel(rootDirectory: string, filePath: string): string {
     return toPosixPath(nodePath.relative(rootDirectory, filePath));
 }
 
-function findDuplicateScriptIds(controllers: EmittedController[], jobs: EmittedJob[]): ControllerProblem[] {
+function findDuplicateScriptIds(controllers: EmittedController[]): ControllerProblem[] {
     const problems: ControllerProblem[] = [];
     const scriptOwners = new Map<string, string>();
     const deployOwners = new Map<string, string>();
     const claim = (owners: Map<string, string>, id: string, filePath: string, label: string) => {
         const owner = owners.get(id);
-        if (owner !== undefined) problems.push({ filePath, message: `${label} '${id}' is also declared by ${owner}; every controller and every job is its own script.` });
+        if (owner !== undefined) problems.push({ filePath, message: `${label} '${id}' is also declared by ${owner}; every controller is its own script.` });
         else owners.set(id, filePath);
     };
     for (const { contract } of controllers) {
         claim(scriptOwners, contract.script.scriptId, contract.filePath, 'scriptId');
         claim(deployOwners, contract.script.deployId, contract.filePath, 'deployId');
-    }
-    for (const { contract } of jobs) {
-        claim(scriptOwners, contract.script.scriptId, contract.filePath, 'scriptId');
-        for (const deployment of contract.script.deployments) claim(deployOwners, deployment, contract.filePath, 'deployment');
     }
     return problems;
 }
@@ -313,7 +307,7 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
             message: 'the project has jobs but no run record: add the `jobRuns` block to netsuite-api.config.json (`npm run add:jobs` writes it, with the record itself).',
         });
     }
-    problems.push(...findDuplicateScriptIds(emitted, emittedJobs));
+    problems.push(...findDuplicateScriptIds(emitted));
 
     const controllers: PlannedController[] = emitted.map(({ contract }) => ({
         name: contract.name,
@@ -326,7 +320,6 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
         name: contract.name,
         filePath: contract.filePath,
         stages: contract.stages,
-        deploymentCount: contract.script.deployments.length,
     }));
     if (problems.length > 0) return { files: [], leftoverFiles: [], controllers, jobs, problems };
 
@@ -343,7 +336,7 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
         ...sortJobs(emittedJobs).map((job) => ({ path: nodePath.join(outDirectory, jobModuleFileName(job.contract.name)), content: emitJobModule(job) })),
         ...(emittedJobs.length > 0 ? [{ path: nodePath.join(outDirectory, JOBS_INDEX_FILE_NAME), content: emitJobsIndexModule(emittedJobs, { jobsLabel }) }] : []),
         { path: nodePath.join(outDirectory, CLIENT_INDEX_FILE_NAME), content: emitClientIndexModule(emitted, { controllersLabel, hasJobs: emittedJobs.length > 0 }) },
-        { path: resolve(config.scriptsOutFile), content: emitScriptsModule(emitted, { wireModule: config.wireModule, controllersLabel, jobs: emittedJobs, jobsLabel, jobRuns }) },
+        { path: resolve(config.scriptsOutFile), content: emitScriptsModule(emitted, { wireModule: config.wireModule, controllersLabel, jobRuns }) },
     ];
     const leftoverFiles = findLeftoverFiles(fileSystem, outDirectory, files.map((file) => file.path));
     return { files, leftoverFiles, controllers, jobs, problems };

@@ -4,8 +4,8 @@ export { JOB_RUN_FIELD_SUFFIXES, netsuiteValueTypeNames, resolveJobRunFieldIds }
 export type { ClientGeneratorConfig, JobRunFieldName, JobRunsSettings, NetsuiteValueTypeName, ResolvedClientGeneratorConfig } from './config.js';
 export { GENERATED_CLIENT_NAME, GENERATED_ENDPOINTS_TYPE_NAME, RAW_RESPONSE_TYPE_NAME, isControllerFileName, readControllerContract, readLeadingJsDoc } from './controllerReader.js';
 export type { CarriedTypeImport, ControllerContract, ControllerKind, ControllerProblem, ControllerReadResult, ControllerTypeImport, DeclaredScript, EndpointSignature, InlinedTypeImport, ReadControllerOptions, TypeDeclaration, TypeImportName } from './controllerReader.js';
-export { GENERATED_JOB_RESULT_TYPE_NAME, JOB_SCRIPT_TYPE_HEADER, JOB_STAGE_NAMES, jobDefinitionFileName, readJobContract, readJobFolderName } from './jobReader.js';
-export type { DeclaredJob, JobContract, JobParameterContract, JobReadResult, JobStageName } from './jobReader.js';
+export { GENERATED_JOB_RESULT_TYPE_NAME, JOB_SCRIPT_TYPE_HEADER, JOB_STAGE_NAMES, RUN_CLOSE_FUNCTION_NAME, RUN_OPEN_FUNCTION_NAME, jobDefinitionFileName, readJobContract, readJobFolderName } from './jobReader.js';
+export type { JobContract, JobFolderFile, JobReadResult, JobStageName, ReadJobOptions } from './jobReader.js';
 export { readInlinableTypesFile, selectInlinedTypes } from './typesFileReader.js';
 export type { InlinableTypeDeclaration, InlinableTypesFile, SelectedInlinedTypes } from './typesFileReader.js';
 export { CLIENT_INDEX_FILE_NAME, JOBS_INDEX_FILE_NAME, controllerModuleFileName, emitClientIndexModule, emitControllerModule, emitJobModule, emitJobsIndexModule, emitScriptsModule, jobModuleFileName } from './emit.js';

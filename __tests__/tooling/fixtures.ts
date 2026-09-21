@@ -251,20 +251,58 @@ export function closeOrder(orderId: number): boolean {
 }
 `;
 
-export const closeStaleOrdersJobSource = `/**
+
+/**
+ * A job as a developer writes one: an ordinary Map/Reduce script whose stages are NetSuite's own entry
+ * points, a file each, and a run opened and closed around them. The file NetSuite loads carries the
+ * header and says which stages there are; the shapes on either end of the run are written where the
+ * stage that names them lives. Keyed by file name, the way the folder holds them.
+ */
+export const closeStaleOrdersJobFiles: Record<string, string> = {
+    'closeStaleOrders.ts': `/**
  * @NApiVersion 2.1
  * @NScriptType MapReduceScript
  * @NModuleScope SameAccount
  */
 
-import { defineJob } from '@amerilux/netsuite-api/server';
-import { jobRuns } from '../../scripts.gen';
-import { closeOrder, listStaleOrders, type StaleOrder } from '../../services/staleOrderService';
+/** Closes the sales orders nobody has touched for long enough, and tallies them by their owner. */
+export { getInputData } from './getInputData';
+export { map } from './map';
+export { reduce } from './reduce';
+export { summarize } from './summarize';
+`,
+    'getInputData.ts': `import type { EntryPoints } from 'N/types';
+import { jobs } from '../../../../netsuite';
+import { openJobRun } from '../../repositories/jobRunRepository';
+import { listStaleOrders, type StaleOrder } from '../../services/staleOrderService';
 
 /** What a run of this job is asked to do. */
 export interface CloseStaleRequest {
     olderThanDays: number;
 }
+
+export function getInputData(_context: EntryPoints.MapReduce.getInputDataContext): StaleOrder[] {
+    const input = openJobRun<CloseStaleRequest>(jobs.closeStaleOrders);
+    return listStaleOrders(input.olderThanDays);
+}
+`,
+    'map.ts': `import type { EntryPoints } from 'N/types';
+import { closeOrder, type StaleOrder } from '../../services/staleOrderService';
+
+export function map(context: EntryPoints.MapReduce.mapContext): void {
+    const order = JSON.parse(context.value) as StaleOrder;
+    if (closeOrder(order.id)) context.write({ key: order.owner.name, value: JSON.stringify(order.id) });
+}
+`,
+    'reduce.ts': `import type { EntryPoints } from 'N/types';
+
+export function reduce(context: EntryPoints.MapReduce.reduceContext): void {
+    context.write({ key: context.key, value: JSON.stringify(context.values.length) });
+}
+`,
+    'summarize.ts': `import type { EntryPoints } from 'N/types';
+import { jobs } from '../../../../netsuite';
+import { closeJobRun } from '../../repositories/jobRunRepository';
 
 /** What the run leaves behind for the page that started it. */
 export interface CloseStaleResult {
@@ -272,24 +310,15 @@ export interface CloseStaleResult {
     owners: string[];
 }
 
-export const { getInputData, map, reduce, summarize } = defineJob({
-    name: 'closeStaleOrders',
-    scriptId: 'customscript_demo_close_stale_mr',
-    deployments: ['customdeploy_demo_close_stale_mr', 'customdeploy_demo_close_stale_mr_2'],
-    runParameter: 'custscript_demo_close_stale_run',
-    parameters: { batchSize: { id: 'custscript_demo_close_stale_batch', type: 'integer' } },
-    runs: jobRuns,
-}, {
-    getInputData: (input: CloseStaleRequest): StaleOrder[] => listStaleOrders(input.olderThanDays),
-    map: (order: StaleOrder, job): void => {
-        if (closeOrder(order.id)) job.write(order.owner.name, order.id);
-    },
-    reduce: (owner: string, orderIds: number[], job): void => {
-        job.write(owner, orderIds.length);
-    },
-    summarize: (summary): CloseStaleResult => ({
-        closed: summary.output.reduce((total, entry) => total + entry.value, 0),
-        owners: summary.output.map((entry) => entry.key),
-    }),
-});
-`;
+export function summarize(context: EntryPoints.MapReduce.summarizeContext): void {
+    let closed = 0;
+    const owners: string[] = [];
+    context.output.iterator().each((key, value) => {
+        closed += JSON.parse(value) as number;
+        owners.push(key);
+        return true;
+    });
+    closeJobRun<CloseStaleResult>(jobs.closeStaleOrders, context, { closed, owners });
+}
+`,
+};
