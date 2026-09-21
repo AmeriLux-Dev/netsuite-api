@@ -125,7 +125,7 @@ function readDateField(raw: unknown): string | null {
  * failure, then every map and reduce key it could not finish. A stage that threw is in here because
  * NetSuite put it here, which is also where the execution log has it.
  */
-function readCollectedErrors(summary: EntryPoints.MapReduce.summarizeContext): JobRunError[] {
+export function readCollectedErrors(summary: EntryPoints.MapReduce.summarizeContext): JobRunError[] {
     const errors: JobRunError[] = [];
     if (summary.inputSummary?.error) errors.push({ stage: 'input', message: summary.inputSummary.error });
     const collect = (stage: Extract<JobRunStage, 'map' | 'reduce'>, container?: EntryPoints.MapReduce.MapSummary | EntryPoints.MapReduce.ReduceSummary) => {

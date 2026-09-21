@@ -200,7 +200,7 @@ export const listRolesForEmployee = (employeeId: number) => userRolesApi.byEmplo
 
 ## Jobs
 
-A job is an ordinary Map/Reduce script: its stages are NetSuite's own entry points, written the way any SuiteScript developer writes them. What this package adds is the run, because a Map/Reduce answers nothing and cannot be waited on: every run is a row in a record of the application's own, and that row is what server code and the browser talk about. Three calls are what it costs a job — the run is opened in `getInputData`, found again by a stage that records something against it, and closed in `summarize`.
+A job is an ordinary Map/Reduce script: its stages are NetSuite's own entry points, written the way any SuiteScript developer writes them. What this package adds is the run, because a Map/Reduce answers nothing and cannot be waited on: every run is a row in a record of the application's own, and that row is what server code and the browser talk about. A stage is built by the builder of that stage, which is where the run and the JSON are handled: `jobGetInputData` opens the run, `jobMap` and `jobReduce` carry the values, and `jobSummarize` writes the result and closes it.
 
 A job is a folder. The file NetSuite loads carries the header and says which stages there are, so what a job is reads at a glance and a developer opens map.ts to see what the map stage does:
 
@@ -231,13 +231,12 @@ export const jobs = {
 } as const;
 ```
 
-Each stage is a file named after the stage NetSuite calls, holding the work and the shapes on its own boundary. `getInputData` opens the run, which answers what it was started with:
+Each stage is a file named after the stage NetSuite calls, holding the work and the shapes on its own boundary. It is built by the builder of that stage, which is what turns the two types into the JSON between the stages and the run around them:
 
 ```ts
 // api/src/jobs/closeStaleOrders/getInputData.ts
-import type { EntryPoints } from 'N/types';
 import { jobs } from '../../../../netsuite';
-import { openJobRun } from '../../repositories/jobRunRepository';
+import { jobGetInputData } from '../../repositories/jobRunRepository';
 import { listStaleOrders, type StaleOrder } from '../../services/staleOrderService';
 
 /** What a run of this job is asked to do. */
@@ -245,31 +244,42 @@ export interface CloseStaleRequest {
     olderThanDays: number;
 }
 
-export function getInputData(_context: EntryPoints.MapReduce.getInputDataContext): StaleOrder[] {
-    const input = openJobRun<CloseStaleRequest>(jobs.closeStaleOrders);
-    return listStaleOrders(input.olderThanDays);
-}
+export const getInputData = jobGetInputData<CloseStaleRequest, StaleOrder>(jobs.closeStaleOrders, (input) => listStaleOrders(input.olderThanDays));
 ```
 
-`map` and `reduce` are NetSuite's, unchanged: the value arrives as JSON and is written on as JSON. `summarize` builds the result and closes the run with it, which is what a page polling the run is waiting for:
+`getInputData` opens the run, so the stage is handed what the run was started with. `map` and `reduce` are given their values parsed and hand values on with `job.write`. What `summarize` answers becomes the run's result and closes the run, which is what a page polling it is waiting for:
 
 ```ts
+// api/src/jobs/closeStaleOrders/map.ts
+export const map = jobMap<StaleOrder, CloseOutcome>(jobs.closeStaleOrders, (order, job) => {
+    job.write(order.owner, { orderId: order.id, closed: closeOrder(order.id) });
+});
+
 // api/src/jobs/closeStaleOrders/summarize.ts
-export function summarize(context: EntryPoints.MapReduce.summarizeContext): void {
-    const closed: number[] = [];
-    context.output.iterator().each((_key, value) => {
-        closed.push(JSON.parse(value) as number);
-        return true;
-    });
-    closeJobRun<CloseStaleResult>(jobs.closeStaleOrders, context, { closed: closed.length });
+export const summarize = jobSummarize<CloseOutcome, CloseStaleResult>(jobs.closeStaleOrders, (summary) => ({
+    closed: summary.output.filter((entry) => entry.value.closed).length,
+}));
+```
+
+The types a builder is given are the run's contract, and the generator reads it there: the first type of `jobGetInputData` is what a run is started with, and the second of `jobSummarize` is what a finished run leaves behind. (A builder left to infer them from the function it is given says the same thing in the annotations, and those are read instead.) The generator copies the shapes the result names into the browser's module, whether the stage file declares them or takes them from a service, and a stage file may name a shape another file of the folder declares — the value a map stage writes is declared in map.ts and named again in summarize.ts. Only the result has to be a shape the client can carry, because it is the only one a browser is handed; the items a run is planned into stay on the server and may be built on whatever the server has.
+
+Between two files those claims are not compared: map saying it writes one shape and summarize expecting another is two statements about a value neither file shares, and nothing catches the difference. Name the shape where it is written and import it where it is read.
+
+Everything NetSuite collected is written onto the run when it closes, so a map key that failed is on the run as well as in the execution log, and a run whose input stage failed is `failed`. Plenty of jobs leave nothing behind, because the records they write are the point: such a job answers `null` from `jobSummarize<Outcome, null>`, and a page watches `status`, the progress fields and `errors` instead of a result. A stage that needs the run it belongs to — to stamp a record with it — reads `job.runId`.
+
+A stage that wants NetSuite's context itself writes the plain entry point instead, and opens or closes its own run:
+
+```ts
+// api/src/jobs/closeStaleOrders/getInputData.ts, written as the entry point NetSuite calls
+export function getInputData(context: EntryPoints.MapReduce.getInputDataContext): StaleOrder[] {
+    const input = openJobRun<CloseStaleRequest>(jobs.closeStaleOrders);
+    return context.isRestarted ? [] : listStaleOrders(input.olderThanDays);
 }
 ```
 
-The two calls are the run's contract, and the generator reads it there: the type `openJobRun` is given is what a run is started with, and the type `closeJobRun` is given is what a finished run leaves behind. It copies the shapes the result names into the browser's module, whether the stage file declares them or takes them from a service, and a stage file may name a shape another file of the folder declares — the value a map stage writes is declared in map.ts and named again in summarize.ts. Only the result has to be a shape the client can carry, because it is the only one a browser is handed; the items a run is planned into stay on the server and may be built on whatever the server has.
+Then the run's shapes are read from `openJobRun` and `closeJobRun` instead, and the JSON between the stages is the stage's own business. Both are jobs; the builders are the shorter way, not the only one.
 
-Everything NetSuite collected is written onto the run by `closeJobRun`, so a map key that failed is on the run as well as in the execution log, and a run whose input stage failed is `failed`. Plenty of jobs leave nothing behind, because the records they write are the point: such a job closes its run with `closeJobRun<null>(job, context, null)`, and a page watches `status`, the progress fields and `errors` instead of a result. A stage that needs the run it belongs to — to stamp a record with it — asks for it with `readJobRunId(job)`.
-
-A job whose runs are scheduled rather than started from a page has no run id to be passed, so `openJobRun` opens one for it; that is all the difference a schedule makes.
+A job whose runs are scheduled rather than started from a page has no run id to be passed, so opening the run creates one; that is all the difference a schedule makes, and such a job takes `void` as its input type.
 
 Reading a run asks the task about progress as well. `stagePercentComplete` is `getPercentageCompleted()`, which NetSuite documents as the percentage complete of the **stage being processed**, so it counts to 100 once per stage; `itemsProcessed` and `itemsTotal` come from that stage's `getTotal*Count()` and `getPending*Count()` pair and only go up. The record keeps the percent (100 once a run ends) but never the counts, so the counts are null for a run that has ended or whose task id NetSuite has purged — by then the run has the result, which the record did keep.
 
@@ -277,7 +287,7 @@ The store belongs in a repository, because it writes a record and submits a task
 
 ```ts
 // api/src/repositories/jobRunRepository.ts
-import { createJobRunStore } from '@amerilux/netsuite-api/server';
+import { createJobRunStore, createJobStages } from '@amerilux/netsuite-api/server';
 import type { JobRef, JobRun } from '@amerilux/netsuite-api/server';
 import type { EntryPoints } from 'N/types';
 import { jobRuns } from '../scripts.gen';
@@ -287,7 +297,10 @@ const jobRunStore = createJobRunStore(jobRuns);
 export const startJobRun = (job: JobRef, input: unknown): string => jobRunStore.start(job, input);
 export const findJobRun = (runId: string): JobRun | null => jobRunStore.read(runId);
 
-// What a stage calls: open the run in getInputData, close it in summarize, and ask for it in between.
+// What a stage is built with: the four builders, over this application's run record.
+export const { jobGetInputData, jobMap, jobReduce, jobSummarize } = createJobStages(jobRunStore);
+
+// What a stage written as the entry point itself calls instead.
 export const openJobRun = <TInput>(job: JobRef): TInput => jobRunStore.openRun<TInput>(job);
 export const readJobRunId = (job: JobRef): string => jobRunStore.currentRunId(job);
 export const closeJobRun = <TResult>(job: JobRef, context: EntryPoints.MapReduce.summarizeContext, result: TResult): void => jobRunStore.closeRun(job, context, result);

@@ -8,6 +8,8 @@ export { ApiError } from './apiError.js';
 export { defineEndpoints, invokeEndpoint, parseEndpointRequest, readEndpointCall } from './endpoint.js';
 export type { AuthorizeEndpoint, ControllerOptions, EndpointCall, EndpointCallContext, EndpointOutcome, InvokeEndpointOptions } from './endpoint.js';
 export { createJobRunStore } from './jobRuns.js';
+export { createJobStages } from './jobStages.js';
+export type { JobStageBuilders, JobStageContext, JobSummary, JobWriteContext } from './jobStages.js';
 export type { JobRunStore, StartJobOptions } from './jobRuns.js';
 export { defineRestlet } from './defineRestlet.js';
 export type { RestletEntryPoint } from './defineRestlet.js';

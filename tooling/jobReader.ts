@@ -42,6 +42,18 @@ export const GENERATED_JOB_RESULT_TYPE_NAME = 'Result';
 export const RUN_OPEN_FUNCTION_NAME = 'openJobRun';
 export const RUN_CLOSE_FUNCTION_NAME = 'closeJobRun';
 
+/**
+ * The typed builder of each stage, which is how most stages are written: the types it is given are the
+ * stage's own claim about what it is handed and what it hands on, and the run and the JSON are its doing.
+ * A stage written as a plain entry point instead says the same things through the run calls above.
+ */
+export const STAGE_BUILDER_NAMES: Record<JobStageName, string> = {
+    getInputData: 'jobGetInputData',
+    map: 'jobMap',
+    reduce: 'jobReduce',
+    summarize: 'jobSummarize',
+};
+
 const jobFileNamePattern = /^([a-z][A-Za-z0-9]*)\.ts$/;
 const jobFolderNamePattern = /^[a-z][A-Za-z0-9]*$/;
 
@@ -189,18 +201,37 @@ function createJobFolderFiles(options: ReadJobOptions): JobFolderFiles {
 
 type StageHandler = ts.ArrowFunction | ts.FunctionExpression | ts.FunctionDeclaration;
 
-/** The exported function of that name in a stage file: `export function map…` or `export const map = …`. */
-function findExportedFunction(sourceFile: ts.SourceFile, name: string): StageHandler | undefined {
+/** How a stage is written: built by its typed builder, or as the plain entry point NetSuite calls. */
+type ExportedStage = { kind: 'builder'; call: ts.CallExpression; builderName: string } | { kind: 'entryPoint'; handler: StageHandler };
+
+/** The stage of that name in its file: `export const map = jobMap<…>(…)`, or `export function map(context)…`. */
+function findExportedStage(sourceFile: ts.SourceFile, name: string): ExportedStage | undefined {
     for (const statement of sourceFile.statements) {
-        if (ts.isFunctionDeclaration(statement) && hasExportModifier(statement) && statement.name?.text === name) return statement;
+        if (ts.isFunctionDeclaration(statement) && hasExportModifier(statement) && statement.name?.text === name) return { kind: 'entryPoint', handler: statement };
         if (!ts.isVariableStatement(statement) || !hasExportModifier(statement)) continue;
         for (const declaration of statement.declarationList.declarations) {
             if (!ts.isIdentifier(declaration.name) || declaration.name.text !== name) continue;
             const initializer = declaration.initializer;
-            if (initializer && (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer))) return initializer;
+            if (!initializer) continue;
+            if (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) return { kind: 'entryPoint', handler: initializer };
+            if (ts.isCallExpression(initializer) && ts.isIdentifier(initializer.expression)) return { kind: 'builder', call: initializer, builderName: initializer.expression.text };
         }
     }
     return undefined;
+}
+
+/** The function a builder was given to run: `jobMap<Item, Outcome>(jobs.closeStaleOrders, (item, job) => …)`. */
+function readBuilderStageFunction(call: ts.CallExpression): StageHandler | undefined {
+    for (const argument of call.arguments) {
+        if (ts.isArrowFunction(argument) || ts.isFunctionExpression(argument)) return argument;
+    }
+    return undefined;
+}
+
+/** The job a builder is given: `jobs.closeStaleOrders` answers `closeStaleOrders`. */
+function readBuilderJobName(call: ts.CallExpression): string | undefined {
+    const [job] = call.arguments;
+    return job && ts.isPropertyAccessExpression(job) ? job.name.text : undefined;
 }
 
 /** The type a call was given, written out: `openJobRun<ApproveRequest>(…)` answers `ApproveRequest`. */
@@ -233,6 +264,92 @@ interface ReadStagesResult {
     inputType?: string;
     resultType?: string;
     problems: ControllerProblem[];
+}
+
+/** What one stage says about the run: its input for getInputData, its result for summarize, nothing for the rest. */
+interface ReadStageResult {
+    typeText?: string;
+    problems: ControllerProblem[];
+}
+
+/**
+ * A stage built by its typed builder. The types it is given are the contract: the first is what
+ * getInputData is handed (the run's input) and the second what summarize returns (the run's result).
+ * A builder left to infer them from its function says the same thing there, so that is read instead.
+ */
+function readBuiltStage(
+    exported: { call: ts.CallExpression; builderName: string },
+    stage: JobStageName,
+    jobName: string,
+    stageFile: { sourceFile: ts.SourceFile; filePath: string },
+): ReadStageResult {
+    const problems: ControllerProblem[] = [];
+    const expectedBuilder = STAGE_BUILDER_NAMES[stage];
+    if (exported.builderName !== expectedBuilder) {
+        problems.push({ filePath: stageFile.filePath, message: `${stage} is built by ${exported.builderName}; NetSuite's ${stage} stage is built by ${expectedBuilder}.` });
+        return { problems };
+    }
+    const declaredJob = readBuilderJobName(exported.call);
+    if (declaredJob !== undefined && declaredJob !== jobName) {
+        problems.push({ filePath: stageFile.filePath, message: `${stage} is given jobs.${declaredJob}, but this is a stage of ${jobName}; a stage opens and closes the run of the job whose folder it is in.` });
+    }
+    if (stage !== 'getInputData' && stage !== 'summarize') return { problems };
+
+    // The input is the first type the builder is given and the result the second, or, where the builder
+    // was left to infer them, what the function it was given is annotated with.
+    const typeArgument = exported.call.typeArguments?.[stage === 'getInputData' ? 0 : 1];
+    if (typeArgument) return { typeText: typeArgument.getText(stageFile.sourceFile), problems };
+    const stageFunction = readBuilderStageFunction(exported.call);
+    const inferred = stage === 'getInputData' ? stageFunction?.parameters[0]?.type : stageFunction?.type;
+    if (!inferred) {
+        const what = stage === 'getInputData' ? "what a run is started with" : 'what a finished run leaves behind';
+        const written = stage === 'getInputData' ? `${expectedBuilder}<Request, Item>(jobs.${jobName}, …)` : `${expectedBuilder}<Outcome, Result>(jobs.${jobName}, …)`;
+        problems.push({ filePath: stageFile.filePath, message: `${stage} says nothing about ${what}; write the types out: \`${written}\`.` });
+        return { problems };
+    }
+    return { typeText: inferred.getText(stageFile.sourceFile), problems };
+}
+
+/**
+ * A stage written as the plain entry point NetSuite calls, which handles its own JSON and its own run.
+ * It says what the run carries through the calls that open and close it.
+ */
+function readEntryPointStage(handler: StageHandler, stage: JobStageName, jobName: string, stageFile: { sourceFile: ts.SourceFile; filePath: string }): ReadStageResult {
+    const problems: ControllerProblem[] = [];
+    const contextType = handler.parameters[0]?.type?.getText(stageFile.sourceFile);
+    if (!isStageContextType(contextType, stage)) {
+        problems.push({
+            filePath: stageFile.filePath,
+            message: `${stage} is neither built by ${STAGE_BUILDER_NAMES[stage]} nor written as the entry point NetSuite calls; a stage of its own takes \`(context: EntryPoints.MapReduce.${stage}Context)\`.`,
+        });
+        return { problems };
+    }
+    if (stage === 'getInputData') {
+        const opened = findCallTypeArgument(stageFile.sourceFile, RUN_OPEN_FUNCTION_NAME);
+        if (!opened.found) {
+            problems.push({
+                filePath: stageFile.filePath,
+                message: `getInputData opens the run it belongs to: \`${RUN_OPEN_FUNCTION_NAME}<Request>(jobs.${jobName})\`, or let ${STAGE_BUILDER_NAMES.getInputData} do it. Without it the run is never claimed and the page follows a run that says nothing.`,
+            });
+        }
+        return { typeText: opened.typeText, problems };
+    }
+    if (stage === 'summarize') {
+        const closed = findCallTypeArgument(stageFile.sourceFile, RUN_CLOSE_FUNCTION_NAME);
+        if (!closed.found) {
+            problems.push({
+                filePath: stageFile.filePath,
+                message: `summarize closes the run: \`${RUN_CLOSE_FUNCTION_NAME}<Result>(jobs.${jobName}, context, result)\`, or let ${STAGE_BUILDER_NAMES.summarize} do it. Without it the run never ends and the page polls a finished job.`,
+            });
+        } else if (closed.typeText === undefined) {
+            problems.push({
+                filePath: stageFile.filePath,
+                message: `${RUN_CLOSE_FUNCTION_NAME} has no type on it; a run's result shape is read from it, so write it out: \`${RUN_CLOSE_FUNCTION_NAME}<Result>(…)\`, or \`<null>\` for a run that leaves nothing.`,
+            });
+        }
+        return { typeText: closed.typeText, problems };
+    }
+    return { problems };
 }
 
 /**
@@ -277,44 +394,19 @@ function readStages(sourceFile: ts.SourceFile, filePath: string, jobName: string
                 continue;
             }
             const localName = (element.propertyName ?? element.name).text;
-            const handler = findExportedFunction(stageFile.sourceFile, localName);
-            if (!handler) {
-                problems.push({ filePath: stageFile.filePath, message: `'${localName}' is not exported from here as a function, and ${jobName} hands it to NetSuite as its ${stage} stage.` });
+            const exported = findExportedStage(stageFile.sourceFile, localName);
+            if (!exported) {
+                problems.push({
+                    filePath: stageFile.filePath,
+                    message: `'${localName}' is not exported from here, and ${jobName} hands it to NetSuite as its ${stage} stage; write it as \`export const ${stage} = ${STAGE_BUILDER_NAMES[stage]}<…>(jobs.${jobName}, …)\`.`,
+                });
                 continue;
             }
             stages.push(stage);
-            const contextType = handler.parameters[0]?.type?.getText(stageFile.sourceFile);
-            if (!isStageContextType(contextType, stage)) {
-                problems.push({
-                    filePath: stageFile.filePath,
-                    message: `${stage} takes NetSuite's own context: \`(context: EntryPoints.MapReduce.${stage}Context)\`, the type it is called with.`,
-                });
-            }
-            if (stage === 'getInputData') {
-                const opened = findCallTypeArgument(stageFile.sourceFile, RUN_OPEN_FUNCTION_NAME);
-                if (!opened.found) {
-                    problems.push({
-                        filePath: stageFile.filePath,
-                        message: `getInputData opens the run it belongs to: \`${RUN_OPEN_FUNCTION_NAME}<Request>(jobs.${jobName})\`. Without it the run is never claimed and the page follows a run that says nothing.`,
-                    });
-                }
-                inputType = opened.typeText;
-            }
-            if (stage === 'summarize') {
-                const closed = findCallTypeArgument(stageFile.sourceFile, RUN_CLOSE_FUNCTION_NAME);
-                if (!closed.found) {
-                    problems.push({
-                        filePath: stageFile.filePath,
-                        message: `summarize closes the run: \`${RUN_CLOSE_FUNCTION_NAME}<Result>(jobs.${jobName}, context, result)\`. Without it the run never ends and the page polls a finished job.`,
-                    });
-                } else if (closed.typeText === undefined) {
-                    problems.push({
-                        filePath: stageFile.filePath,
-                        message: `${RUN_CLOSE_FUNCTION_NAME} has no type on it; a run's result shape is read from it, so write it out: \`${RUN_CLOSE_FUNCTION_NAME}<Result>(…)\`, or \`<null>\` for a run that leaves nothing.`,
-                    });
-                }
-                resultType = closed.typeText;
-            }
+            const read = exported.kind === 'builder' ? readBuiltStage(exported, stage, jobName, stageFile) : readEntryPointStage(exported.handler, stage, jobName, stageFile);
+            problems.push(...read.problems);
+            if (stage === 'getInputData') inputType = read.typeText;
+            if (stage === 'summarize') resultType = read.typeText;
         }
     }
 

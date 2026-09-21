@@ -258,6 +258,12 @@ export function closeOrder(orderId: number): boolean {
  * header and says which stages there are; the shapes on either end of the run are written where the
  * stage that names them lives. Keyed by file name, the way the folder holds them.
  */
+/**
+ * A job as a developer writes one: an ordinary Map/Reduce script whose stages are NetSuite's own entry
+ * points, a file each, built by the typed builders so the JSON and the run are handled for them. The file
+ * NetSuite loads carries the header and says which stages there are; the shapes on either end of the run
+ * are written where the stage that names them lives. Keyed by file name, the way the folder holds them.
+ */
 export const closeStaleOrdersJobFiles: Record<string, string> = {
     'closeStaleOrders.ts': `/**
  * @NApiVersion 2.1
@@ -271,9 +277,8 @@ export { map } from './map';
 export { reduce } from './reduce';
 export { summarize } from './summarize';
 `,
-    'getInputData.ts': `import type { EntryPoints } from 'N/types';
-import { jobs } from '../../../../netsuite';
-import { openJobRun } from '../../repositories/jobRunRepository';
+    'getInputData.ts': `import { jobs } from '../../../../netsuite';
+import { jobGetInputData } from '../../repositories/jobRunRepository';
 import { listStaleOrders, type StaleOrder } from '../../services/staleOrderService';
 
 /** What a run of this job is asked to do. */
@@ -281,28 +286,25 @@ export interface CloseStaleRequest {
     olderThanDays: number;
 }
 
-export function getInputData(_context: EntryPoints.MapReduce.getInputDataContext): StaleOrder[] {
-    const input = openJobRun<CloseStaleRequest>(jobs.closeStaleOrders);
-    return listStaleOrders(input.olderThanDays);
-}
+export const getInputData = jobGetInputData<CloseStaleRequest, StaleOrder>(jobs.closeStaleOrders, (input) => listStaleOrders(input.olderThanDays));
 `,
-    'map.ts': `import type { EntryPoints } from 'N/types';
+    'map.ts': `import { jobs } from '../../../../netsuite';
+import { jobMap } from '../../repositories/jobRunRepository';
 import { closeOrder, type StaleOrder } from '../../services/staleOrderService';
 
-export function map(context: EntryPoints.MapReduce.mapContext): void {
-    const order = JSON.parse(context.value) as StaleOrder;
-    if (closeOrder(order.id)) context.write({ key: order.owner.name, value: JSON.stringify(order.id) });
-}
+export const map = jobMap<StaleOrder, number>(jobs.closeStaleOrders, (order, job) => {
+    if (closeOrder(order.id)) job.write(order.owner.name, order.id);
+});
 `,
-    'reduce.ts': `import type { EntryPoints } from 'N/types';
+    'reduce.ts': `import { jobs } from '../../../../netsuite';
+import { jobReduce } from '../../repositories/jobRunRepository';
 
-export function reduce(context: EntryPoints.MapReduce.reduceContext): void {
-    context.write({ key: context.key, value: JSON.stringify(context.values.length) });
-}
+export const reduce = jobReduce<number, number>(jobs.closeStaleOrders, (key, values, job) => {
+    job.write(key, values.length);
+});
 `,
-    'summarize.ts': `import type { EntryPoints } from 'N/types';
-import { jobs } from '../../../../netsuite';
-import { closeJobRun } from '../../repositories/jobRunRepository';
+    'summarize.ts': `import { jobs } from '../../../../netsuite';
+import { jobSummarize } from '../../repositories/jobRunRepository';
 
 /** What the run leaves behind for the page that started it. */
 export interface CloseStaleResult {
@@ -310,15 +312,9 @@ export interface CloseStaleResult {
     owners: string[];
 }
 
-export function summarize(context: EntryPoints.MapReduce.summarizeContext): void {
-    let closed = 0;
-    const owners: string[] = [];
-    context.output.iterator().each((key, value) => {
-        closed += JSON.parse(value) as number;
-        owners.push(key);
-        return true;
-    });
-    closeJobRun<CloseStaleResult>(jobs.closeStaleOrders, context, { closed, owners });
-}
+export const summarize = jobSummarize<number, CloseStaleResult>(jobs.closeStaleOrders, (summary) => ({
+    closed: summary.output.reduce((total, entry) => total + entry.value, 0),
+    owners: summary.output.map((entry) => entry.key),
+}));
 `,
 };

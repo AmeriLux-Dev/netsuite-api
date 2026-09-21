@@ -115,34 +115,114 @@ describe('readJobContract', () => {
         const fromPackage = closeStaleOrdersJobFiles['closeStaleOrders.ts'].replace("export { map } from './map';", "export { map } from '@amerilux/netsuite-api/server';");
         expect(problemsOf({ 'closeStaleOrders.ts': fromPackage })).toContainEqual(expect.stringContaining("'@amerilux/netsuite-api/server' is somewhere else"));
         expect(problemsOf({ 'map.ts': undefined })).toContainEqual(expect.stringContaining("there is no './map' beside the job"));
-        expect(problemsOf({ 'map.ts': 'export const map = 7;\n' })).toContainEqual(expect.stringContaining("'map' is not exported from here as a function"));
+        expect(problemsOf({ 'map.ts': 'export const mapTheOrders = 7;\n' })).toContainEqual(expect.stringContaining("'map' is not exported from here"));
     });
 
-    it("wants a stage annotated with NetSuite's own context, the type it is called with", () => {
-        const problems = readJob({ 'map.ts': "export function map(context: { value: string }): void {\n    void context;\n}\n" }).problems;
+    it('wants each stage built by the builder of that stage', () => {
+        const builtByTheWrongOne = closeStaleOrdersJobFiles['map.ts'].replace('jobMap<StaleOrder, number>', 'jobReduce<StaleOrder, number>');
+
+        expect(problemsOf({ 'map.ts': builtByTheWrongOne })).toContainEqual(expect.stringContaining("map is built by jobReduce"));
+    });
+
+    it('says so when a stage opens the run of another job', () => {
+        const someoneElsesJob = closeStaleOrdersJobFiles['summarize.ts'].replace('jobs.closeStaleOrders', 'jobs.closeYoungOrders');
+
+        expect(problemsOf({ 'summarize.ts': someoneElsesJob })).toContainEqual(expect.stringContaining('is given jobs.closeYoungOrders, but this is a stage of closeStaleOrders'));
+    });
+
+    it('reads the shapes a builder was left to infer from the function it was given', () => {
+        const inferred = closeStaleOrdersJobFiles['getInputData.ts'].replace(
+            'jobGetInputData<CloseStaleRequest, StaleOrder>(jobs.closeStaleOrders, (input) =>',
+            'jobGetInputData(jobs.closeStaleOrders, (input: CloseStaleRequest): StaleOrder[] =>',
+        );
+        const result = readJob({ 'getInputData.ts': inferred });
+
+        expect(result.problems).toEqual([]);
+        expect(result.contract?.inputType).toBe('CloseStaleRequest');
+    });
+
+    it('wants the run\'s shapes written out when neither the builder nor its function says them', () => {
+        const silent = closeStaleOrdersJobFiles['summarize.ts'].replace('jobSummarize<number, CloseStaleResult>(jobs.closeStaleOrders, (summary)', 'jobSummarize(jobs.closeStaleOrders, (summary: { output: { key: string; value: number }[] })');
+        const problems = readJob({ 'summarize.ts': silent }).problems;
+
+        expect(problems.map((problem) => problem.message)).toContainEqual(expect.stringContaining('summarize says nothing about what a finished run leaves behind'));
+        expect(problems.map((problem) => problem.filePath)).toContainEqual('api/src/jobs/closeStaleOrders/summarize.ts');
+    });
+});
+
+/**
+ * The way out of the builders: a stage that wants NetSuite's context writes the entry point itself and
+ * opens or closes its own run. The generator reads the run's shapes from those calls instead.
+ */
+describe('a stage written as the entry point NetSuite calls', () => {
+    const rawGetInputData = `import type { EntryPoints } from 'N/types';
+import { jobs } from '../../../../netsuite';
+import { openJobRun } from '../../repositories/jobRunRepository';
+import { listStaleOrders, type StaleOrder } from '../../services/staleOrderService';
+
+/** What a run of this job is asked to do. */
+export interface CloseStaleRequest {
+    olderThanDays: number;
+}
+
+export function getInputData(context: EntryPoints.MapReduce.getInputDataContext): StaleOrder[] {
+    const input = openJobRun<CloseStaleRequest>(jobs.closeStaleOrders);
+    return context.isRestarted ? [] : listStaleOrders(input.olderThanDays);
+}
+`;
+    const rawSummarize = `import type { EntryPoints } from 'N/types';
+import { jobs } from '../../../../netsuite';
+import { closeJobRun } from '../../repositories/jobRunRepository';
+
+/** What the run leaves behind for the page that started it. */
+export interface CloseStaleResult {
+    closed: number;
+    owners: string[];
+}
+
+export function summarize(context: EntryPoints.MapReduce.summarizeContext): void {
+    let closed = 0;
+    const owners: string[] = [];
+    context.output.iterator().each((key, value) => {
+        closed += JSON.parse(value) as number;
+        owners.push(key);
+        return true;
+    });
+    closeJobRun<CloseStaleResult>(jobs.closeStaleOrders, context, { closed, owners });
+}
+`;
+
+    it('reads the run\'s shapes from the calls that open and close it', () => {
+        const result = readJob({ 'getInputData.ts': rawGetInputData, 'summarize.ts': rawSummarize });
+
+        expect(result.problems).toEqual([]);
+        expect(result.contract).toMatchObject({ inputType: 'CloseStaleRequest', resultType: 'CloseStaleResult' });
+    });
+
+    it('wants NetSuite\'s own context on it, since that is what it is called with', () => {
+        const problems = readJob({ 'map.ts': 'export function map(context: { value: string }): void {\n    void context;\n}\n' }).problems;
 
         expect(problems.map((problem) => problem.message)).toContainEqual(expect.stringContaining('EntryPoints.MapReduce.mapContext'));
         expect(problems.map((problem) => problem.filePath)).toContainEqual('api/src/jobs/closeStaleOrders/map.ts');
     });
 
     it('wants the run opened in getInputData and closed in summarize', () => {
-        const withoutOpen = closeStaleOrdersJobFiles['getInputData.ts'].replace('openJobRun<CloseStaleRequest>(jobs.closeStaleOrders)', '{ olderThanDays: 30 }');
+        const withoutOpen = rawGetInputData.replace('openJobRun<CloseStaleRequest>(jobs.closeStaleOrders)', '{ olderThanDays: 30 }');
         expect(problemsOf({ 'getInputData.ts': withoutOpen })).toContainEqual(expect.stringContaining('getInputData opens the run it belongs to'));
 
-        const withoutClose = closeStaleOrdersJobFiles['summarize.ts'].replace('closeJobRun<CloseStaleResult>(jobs.closeStaleOrders, context, { closed, owners });', 'void closed;\n    void owners;');
+        const withoutClose = rawSummarize.replace('closeJobRun<CloseStaleResult>(jobs.closeStaleOrders, context, { closed, owners });', 'void closed;\n    void owners;');
         expect(problemsOf({ 'summarize.ts': withoutClose })).toContainEqual(expect.stringContaining('summarize closes the run'));
     });
 
     it('wants the result written on the call that closes the run, which is where it reads it', () => {
-        const untyped = closeStaleOrdersJobFiles['summarize.ts'].replace('closeJobRun<CloseStaleResult>(', 'closeJobRun(');
+        const untyped = rawSummarize.replace('closeJobRun<CloseStaleResult>(', 'closeJobRun(');
         const problems = readJob({ 'summarize.ts': untyped }).problems;
 
         expect(problems.map((problem) => problem.message)).toContainEqual(expect.stringContaining('a run\'s result shape is read from it'));
-        expect(problems.map((problem) => problem.filePath)).toContainEqual('api/src/jobs/closeStaleOrders/summarize.ts');
     });
 
     it('takes a run that carries no input, which is how a scheduled job opens its own run', () => {
-        const scheduled = closeStaleOrdersJobFiles['getInputData.ts']
+        const scheduled = rawGetInputData
             .replace('const input = openJobRun<CloseStaleRequest>(jobs.closeStaleOrders);', 'openJobRun(jobs.closeStaleOrders);')
             .replace('listStaleOrders(input.olderThanDays)', 'listStaleOrders(30)');
         const result = readJob({ 'getInputData.ts': scheduled });
@@ -237,7 +317,10 @@ export function summarize(context: EntryPoints.MapReduce.summarizeContext): void
     });
 
     it('gives a run that leaves nothing behind a null result', () => {
-        const leavingNothing = closeStaleOrdersJobFiles['summarize.ts'].replace('closeJobRun<CloseStaleResult>(jobs.closeStaleOrders, context, { closed, owners })', 'closeJobRun<null>(jobs.closeStaleOrders, context, null)');
+        const leavingNothing = closeStaleOrdersJobFiles['summarize.ts'].replace(
+            /export const summarize[\s\S]*$/,
+            'export const summarize = jobSummarize<number, null>(jobs.closeStaleOrders, () => null);\n',
+        );
         const module =
             planClientGeneration(optionsFor(projectFiles(jobFolder({ 'summarize.ts': leavingNothing })))).files.find((file) => file.path === jobModuleFile)?.content ?? '';
 
