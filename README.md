@@ -231,27 +231,49 @@ export const jobs = {
 } as const;
 ```
 
-Each stage is a file named after the stage NetSuite calls, holding the work and the shapes on its own boundary. It is built by the builder of that stage, which is what turns the two types into the JSON between the stages and the run around them:
+The shapes a run carries live in one file of the folder, `contract.ts`: what a run is started with, what the work is made of, what the stages hand each other, and what the run leaves behind. Every stage imports from it, so a reader sees the whole chain in one place, and two stages naming the same value name the same declaration.
 
 ```ts
-// api/src/jobs/closeStaleOrders/getInputData.ts
-import { jobs } from '../../../../netsuite';
-import { jobGetInputData } from '../../repositories/jobRunRepository';
-import { listStaleOrders, type StaleOrder } from '../../services/staleOrderService';
+// api/src/jobs/closeStaleOrders/contract.ts
+import type { StaleOrder } from '../../services/staleOrderService';
 
 /** What a run of this job is asked to do. */
 export interface CloseStaleRequest {
     olderThanDays: number;
 }
 
-export const getInputData = jobGetInputData<CloseStaleRequest, StaleOrder>(jobs.closeStaleOrders, (input) => listStaleOrders(input.olderThanDays));
+/** The work: one stale order per map stage. */
+export type CloseStaleItem = StaleOrder;
+
+/** What closing one order came to: what map writes and summarize reads. */
+export interface CloseOutcome {
+    orderId: number;
+    closed: boolean;
+}
+
+/** What a finished run leaves behind. */
+export interface CloseStaleResult {
+    closed: number;
+}
+```
+
+Each stage is then a file named after the stage NetSuite calls, holding the work. It is built by the builder of that stage, which is what turns its two types into the JSON between the stages and the run around them:
+
+```ts
+// api/src/jobs/closeStaleOrders/getInputData.ts
+import { jobs } from '../../../../netsuite';
+import { jobGetInputData } from '../../repositories/jobRunRepository';
+import { listStaleOrders } from '../../services/staleOrderService';
+import type { CloseStaleItem, CloseStaleRequest } from './contract';
+
+export const getInputData = jobGetInputData<CloseStaleRequest, CloseStaleItem>(jobs.closeStaleOrders, (input) => listStaleOrders(input.olderThanDays));
 ```
 
 `getInputData` opens the run, so the stage is handed what the run was started with. `map` and `reduce` are given their values parsed and hand values on with `job.write`. What `summarize` answers becomes the run's result and closes the run, which is what a page polling it is waiting for:
 
 ```ts
 // api/src/jobs/closeStaleOrders/map.ts
-export const map = jobMap<StaleOrder, CloseOutcome>(jobs.closeStaleOrders, (order, job) => {
+export const map = jobMap<CloseStaleItem, CloseOutcome>(jobs.closeStaleOrders, (order, job) => {
     job.write(order.owner, { orderId: order.id, closed: closeOrder(order.id) });
 });
 
@@ -261,9 +283,9 @@ export const summarize = jobSummarize<CloseOutcome, CloseStaleResult>(jobs.close
 }));
 ```
 
-The types a builder is given are the run's contract, and the generator reads it there: the first type of `jobGetInputData` is what a run is started with, and the second of `jobSummarize` is what a finished run leaves behind. (A builder left to infer them from the function it is given says the same thing in the annotations, and those are read instead.) The generator copies the shapes the result names into the browser's module, whether the stage file declares them or takes them from a service, and a stage file may name a shape another file of the folder declares — the value a map stage writes is declared in map.ts and named again in summarize.ts. Only the result has to be a shape the client can carry, because it is the only one a browser is handed; the items a run is planned into stay on the server and may be built on whatever the server has.
+The types a builder is given are the run's contract, and the generator reads it there: the first type of `jobGetInputData` is what a run is started with, and the second of `jobSummarize` is what a finished run leaves behind. (A builder left to infer them from the function it is given says the same thing in the annotations, and those are read instead.) The generator follows the stages into `contract.ts`, or into any other file of the folder a shape is declared in, and copies only the shapes the result reaches into the browser's module — whether contract.ts declares them or takes them from a service. Only the result has to be a shape the client can carry, because it is the only one a browser is handed; the request, the items and what the stages hand each other stay on the server and may be built on whatever the server has.
 
-Between two files those claims are not compared: map saying it writes one shape and summarize expecting another is two statements about a value neither file shares, and nothing catches the difference. Name the shape where it is written and import it where it is read.
+The builders do not compare one stage's claims against another's: map saying it writes one shape and summarize expecting another would be two statements about a value neither file shares. With every shape in contract.ts that does not arise — both stages import the one `CloseOutcome` — which is the reason the shapes live there rather than beside the stage that writes them.
 
 Everything NetSuite collected is written onto the run when it closes, so a map key that failed is on the run as well as in the execution log, and a run whose input stage failed is `failed`. Plenty of jobs leave nothing behind, because the records they write are the point: such a job answers `null` from `jobSummarize<Outcome, null>`, and a page watches `status`, the progress fields and `errors` instead of a result. A stage that needs the run it belongs to — to stamp a record with it — reads `job.runId`.
 
