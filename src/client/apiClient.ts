@@ -1,10 +1,13 @@
-import { ENDPOINT_PARAMETER, type ApiEnvelope, type EndpointRequest, type EndpointResponse, type Endpoints, type RawResponse, type ScriptKind, type ScriptRef } from '../index.js';
+import { ENDPOINT_PARAMETER, type ApiEnvelope, type ScriptKind, type ScriptRef } from '../index.js';
 
 /**
- * Calls an API controller by its script and deployment ids, one endpoint at a time. The entry's
- * `kind` decides the URL, so a controller can move between Restlet and Suitelet without touching
- * the caller. In the deployed app the call rides the NetSuite session on the same origin; a
- * development server that proxies to a sandbox sets its own base paths with configureApiClient.
+ * Calls an API controller by its script and deployment ids, one endpoint at a time. The generated
+ * module of a browser-facing controller writes one function per endpoint, and each is a call to
+ * callEndpoint (callRawEndpoint for an endpoint that answers with a document) naming the script,
+ * the endpoint and the request. The script's `kind` decides the URL, so a controller can move
+ * between Restlet and Suitelet without touching the caller. In the deployed app the call rides the
+ * NetSuite session on the same origin; a development server that proxies to a sandbox sets its own
+ * base paths with configureApiClient.
  *
  * Every failure is one error type, ApiClientError, and is handed to the configured error handler
  * before the call rejects: the app reports failures in one place, and a hook or a page adds error
@@ -152,38 +155,5 @@ export function callRawEndpoint(scriptRef: ScriptRef, endpointName: string, requ
             throw new ApiClientError(response.status, `${scriptRef.scriptId}.${endpointName} answered JSON where a document was expected.`, text.slice(0, 500));
         }
         return response.blob();
-    });
-}
-
-/** What the client resolves to for an endpoint's response type: a Blob for a raw answer, the data otherwise. */
-export type ClientResponse<TResponse> = TResponse extends RawResponse ? Blob : TResponse;
-
-/**
- * One function per endpoint, typed by the controller's handlers: `user.api.roles()`,
- * `orders.api.byId({ id })`, `exports.api.csv({ month })` resolving to a Blob. The request comes first,
- * the call options second.
- */
-export type ApiClient<TEndpoints extends Endpoints> = {
-    readonly [TName in keyof TEndpoints]: (request: EndpointRequest<TEndpoints[TName]>, options?: ApiCallOptions) => Promise<ClientResponse<EndpointResponse<TEndpoints[TName]>>>;
-};
-
-export interface ApiClientOptions {
-    /** The endpoints that answer with a document: the generator lists every handler whose return type is RawResponse. */
-    rawEndpoints?: readonly string[];
-}
-
-/**
- * Builds the typed client for a controller from its script: `createApiClient<Endpoints>({ kind, scriptId, deployId })`.
- * The endpoint names come from the type alone; the property accessed is the endpoint named on the wire.
- * The generated module of a browser-facing controller calls this once.
- */
-export function createApiClient<TEndpoints extends Endpoints>(scriptRef: ScriptRef, clientOptions: ApiClientOptions = {}): ApiClient<TEndpoints> {
-    const rawEndpoints = new Set(clientOptions.rawEndpoints ?? []);
-    return new Proxy({} as ApiClient<TEndpoints>, {
-        get(_target, endpointName) {
-            if (typeof endpointName !== 'string') return undefined;
-            const call = rawEndpoints.has(endpointName) ? callRawEndpoint : callEndpoint;
-            return (request: unknown, options?: ApiCallOptions) => call(scriptRef, endpointName, (request ?? {}) as object, options);
-        },
     });
 }

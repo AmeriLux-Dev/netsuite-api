@@ -75,20 +75,22 @@ describe('planClientGeneration', () => {
         });
         const plan = planClientGeneration(optionsFor(fileSystem));
         expect(plan.problems).toEqual([]);
-        expect(plan.files[0].content).not.toContain('createApiClient');
+        expect(plan.files[0].content).not.toContain('@amerilux/netsuite-api/client');
+        expect(plan.files[0].content).not.toContain('export const api');
         expect(plan.files[0].content).toContain('// Called by server code only: its types, and no client.');
-        expect(plan.files[0].content).toContain('export type Endpoints = {');
+        expect(plan.files[0].content).toContain('export interface RolesResponse {');
         expect(plan.files[2].content).toContain('/** The user controller: its request and response types only; server code calls it, the browser does not. */');
         expect(plan.files[3].content).toContain("user: { kind: 'restlet', scriptId: 'customscript_demo_user', deployId: 'customdeploy_demo_user', browser: false },");
     });
 
-    it('lists the raw endpoints on the client and imports RawResponse from the client entry', () => {
+    it('calls a raw endpoint through callRawEndpoint, resolving to a Blob, and leaves RawResponse unimported', () => {
         const documentsController = `/**
  * @NScriptType Suitelet
  */
 import type { RawResponse } from '@amerilux/netsuite-api/server';
 import { defineEndpoints, defineSuitelet, rawResponse } from '@amerilux/netsuite-api/server';
 export const documentsEndpoints = defineEndpoints({
+    /** The month as a CSV download; its return type is written exactly \`RawResponse\`. */
     csv: (request: { month: string }): RawResponse => rawResponse({ contentType: 'text/csv', body: request.month }),
     months: (): string[] => [],
 });
@@ -99,9 +101,33 @@ export const onRequest = defineSuitelet({ name: 'documents', scriptId: 'customsc
         expect(plan.problems).toEqual([]);
         const documentsModule = plan.files[0];
         expect(documentsModule.path).toBe(nodePath.join(clientDirectory, 'documents.gen.ts'));
-        expect(documentsModule.content).toContain("import type { RawResponse } from '@amerilux/netsuite-api/client';");
-        expect(documentsModule.content).toContain('    csv: (request: { month: string }) => RawResponse;');
-        expect(documentsModule.content).toContain("export const api = createApiClient<Endpoints>({ kind: 'suitelet', scriptId: 'customscript_demo_documents', deployId: 'customdeploy_demo_documents' }, { rawEndpoints: ['csv'] });");
+        expect(documentsModule.content).toContain("import { callEndpoint, callRawEndpoint } from '@amerilux/netsuite-api/client';");
+        expect(documentsModule.content).toContain("import type { ApiCallOptions, ScriptRef } from '@amerilux/netsuite-api/client';");
+        // The JSDoc still names RawResponse; a mention in a comment is not a use, so the import is left out.
+        expect(documentsModule.content).toContain('its return type is written exactly `RawResponse`');
+        expect(documentsModule.content).not.toMatch(/import type {[^}]*RawResponse/);
+        expect(documentsModule.content).toContain("const documentsScriptRef: ScriptRef = { kind: 'suitelet', scriptId: 'customscript_demo_documents', deployId: 'customdeploy_demo_documents' };");
+        expect(documentsModule.content).toContain("    csv: (request: { month: string }, options?: ApiCallOptions): Promise<Blob> => callRawEndpoint(documentsScriptRef, 'csv', request, options),");
+        expect(documentsModule.content).toContain("    months: (options?: ApiCallOptions): Promise<string[]> => callEndpoint<string[]>(documentsScriptRef, 'months', {}, options),");
+    });
+
+    it('passes an optional request through as it came, and a missing one as an empty body', () => {
+        const searchController = restletController('search', `
+export const searchEndpoints = defineEndpoints({
+    /** Every match, or everything when there is no text. */
+    find: (request?: { text: string }): string[] => [],
+});`);
+        const plan = planClientGeneration(optionsFor(projectFiles({ [nodePath.join(controllersDirectory, 'searchController.ts')]: searchController })));
+        expect(plan.problems).toEqual([]);
+        expect(plan.files[0].content).toContain(
+            [
+                '/** One function per endpoint of the search controller: `search.api.find(...)`. */',
+                'export const api = {',
+                '    /** Every match, or everything when there is no text. */',
+                "    find: (request?: { text: string }, options?: ApiCallOptions): Promise<string[]> => callEndpoint<string[]>(searchScriptRef, 'find', request, options),",
+                '};',
+            ].join('\n'),
+        );
     });
 
     it('copies the entity types a controller names, what they refer to, and an alias for a renamed import', () => {
@@ -129,9 +155,10 @@ export const employeeEndpoints = defineEndpoints({ me: (): EmployeeRecord => ({}
                 '',
                 'export type EmployeeRecord = Employee;',
                 '',
-                '/** The endpoint signatures of the employee controller, as its handlers declare them. */',
+                '/** The script the employee controller declares: every call below posts to it. */',
             ].join('\n'),
         );
+        expect(employeeModule).toContain("    me: (options?: ApiCallOptions): Promise<EmployeeRecord> => callEndpoint<EmployeeRecord>(employeeScriptRef, 'me', {}, options),");
         expect(employeeModule).not.toContain('EmployeeRole');
         expect(employeeModule).not.toContain('EmployeeCreate');
     });
@@ -182,7 +209,7 @@ export const shiftsEndpoints = defineEndpoints({
         const shiftsModule = plan.files[0].content;
         expect(shiftsModule).toContain('export interface ShiftWindow {\n    from: string;\n    to: string | null;\n}');
         expect(shiftsModule).toContain('export interface Shift { id: number; startsAt: string; window: ShiftWindow }');
-        expect(shiftsModule).toContain('    latest: () => string | undefined;');
+        expect(shiftsModule).toContain("    latest: (options?: ApiCallOptions): Promise<string | undefined> => callEndpoint<string | undefined>(shiftsScriptRef, 'latest', {}, options),");
         expect(shiftsModule).not.toContain('Date');
 
         const requestsController = restletController('shifts', `
@@ -234,15 +261,15 @@ export const employeeEndpoints = defineEndpoints({ create: (request: EmployeeCre
         ]);
     });
 
-    it('reports a script id two controllers both declare, a controller that would take the index, and a wire shape named Endpoints', () => {
+    it('reports a script id two controllers both declare, a controller that would take the index, and a wire shape named after a type the client imports', () => {
         const plan = planClientGeneration(optionsFor(projectFiles({
             [nodePath.join(controllersDirectory, 'userController.ts')]: userControllerSource.replace("scriptId: 'customscript_demo_user'", "scriptId: 'customscript_demo_user_roles'"),
             [nodePath.join(controllersDirectory, 'indexController.ts')]: restletController('index', `
-export interface Endpoints { a: number }
+export interface ApiCallOptions { a: number }
 export const indexEndpoints = defineEndpoints({ list: (): string[] => [] });`),
         })));
         expect(plan.problems).toEqual([
-            { filePath: 'api/src/controllers/indexController.ts', message: "type 'Endpoints' is the name the generated module gives the endpoint signatures; call the wire shape something else." },
+            { filePath: 'api/src/controllers/indexController.ts', message: "type 'ApiCallOptions' is a name the generated module imports for its client; call the wire shape something else." },
             { filePath: 'api/src/controllers/userRolesController.ts', message: "scriptId 'customscript_demo_user_roles' is also declared by api/src/controllers/userController.ts; every controller is its own script." },
         ]);
         const namedIndex = planClientGeneration(optionsFor(projectFiles({

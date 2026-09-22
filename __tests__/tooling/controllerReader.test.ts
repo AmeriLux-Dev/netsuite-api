@@ -127,16 +127,16 @@ export const thingEndpoints = defineEndpoints({
         ]);
     });
 
-    it('requires every type to be exported, written out, and not named after the generated endpoint type', () => {
+    it('requires every type to be exported, written out, and not named after a type the generated client imports', () => {
         const source = thingController(`
 interface Hidden { a: 1 }
 export type Copied = typeof something;
-export interface Endpoints { a: 1 }
+export interface ScriptRef { a: 1 }
 export const thingEndpoints = defineEndpoints({ list: (): Hidden[] => [] });`);
         expect(messages(source)).toEqual([
             "'Hidden' is not exported; every type in a controller is a wire shape, so export it (or move it below the controller).",
             "type 'Copied' is a typeof; a wire shape is written out as an interface or a type alias.",
-            "type 'Endpoints' is the name the generated module gives the endpoint signatures; call the wire shape something else.",
+            "type 'ScriptRef' is a name the generated module imports for its client; call the wire shape something else.",
         ]);
     });
 

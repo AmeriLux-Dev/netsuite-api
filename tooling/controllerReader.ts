@@ -33,8 +33,8 @@ export interface EndpointSignature {
 /** The return type a handler writes, exactly, to answer with a document instead of the envelope. */
 export const RAW_RESPONSE_TYPE_NAME = 'RawResponse';
 
-/** The type every generated controller module declares for its endpoint signatures: `user.Endpoints`. */
-export const GENERATED_ENDPOINTS_TYPE_NAME = 'Endpoints';
+/** The types a generated browser-facing controller module imports for its client: a wire shape cannot take these names. */
+export const GENERATED_CLIENT_TYPE_IMPORT_NAMES = ['ApiCallOptions', 'ScriptRef'] as const;
 /** The client every generated browser-facing controller module exports: `user.api`. */
 export const GENERATED_CLIENT_NAME = 'api';
 
@@ -330,8 +330,8 @@ export function readControllerContract(filePath: string, source: string, options
                 problems.push({ filePath, message: `'${statement.name.text}' is not exported; every type in a controller is a wire shape, so export it (or move it below the controller).` });
                 continue;
             }
-            if (statement.name.text === GENERATED_ENDPOINTS_TYPE_NAME) {
-                problems.push({ filePath, message: `type '${GENERATED_ENDPOINTS_TYPE_NAME}' is the name the generated module gives the endpoint signatures; call the wire shape something else.` });
+            if ((GENERATED_CLIENT_TYPE_IMPORT_NAMES as readonly string[]).includes(statement.name.text)) {
+                problems.push({ filePath, message: `type '${statement.name.text}' is a name the generated module imports for its client; call the wire shape something else.` });
                 continue;
             }
             const jsDoc = readLeadingJsDoc(statement, sourceFile);

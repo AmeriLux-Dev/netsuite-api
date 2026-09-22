@@ -252,7 +252,7 @@ describe('the shapes a run carries to the browser', () => {
         expect(module).toContain('export type Result = CloseStaleResult;');
         expect(module).toContain('export interface CloseStaleResult {');
         expect(module).toContain('// Types from api/src/jobs/closeStaleOrders/summarize.ts, copied so this module stands on its own.');
-        expect(module).not.toContain('createApiClient');
+        expect(module).not.toContain('@amerilux/netsuite-api/client');
         // Nothing in the browser names what a run is started with or what its stages pass along, so neither is copied.
         expect(module).not.toContain('export type Input');
         expect(module).not.toContain('CloseStaleRequest');

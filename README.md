@@ -3,7 +3,7 @@
 The API layer for a NetSuite single-page app. The app's server side is SuiteScript; its browser side is a bundle served by a Suitelet. This package holds what sits between them, so a project writes controllers and services and nothing else:
 
 - **`@amerilux/netsuite-api/server`**: declare a controller's endpoints and the script that serves them, expose them as a Restlet or a Suitelet, reject a call with an `ApiError`, call another Suitelet controller from server code, keep the record a Map/Reduce job's runs live in, and find a File Cabinet file by name.
-- **`@amerilux/netsuite-api/client`**: a typed browser client per controller, built from the endpoint types.
+- **`@amerilux/netsuite-api/client`**: the call every generated client function makes (`callEndpoint`, `callRawEndpoint`: the POST, the envelope, the error) and the configuration they share.
 - **`@amerilux/netsuite-api/testing`**: stubs for the `N/*` modules and the vitest wiring that routes imports to them.
 - **`netsuite-api generate`**: reads the controllers and the jobs and writes the client's whole view of the backend, one module each and an index re-exporting them, plus the server-side map of scripts and the run record. The client never imports from the server tree.
 - **`@amerilux/netsuite-api`** (the root): the wire itself. The envelope, the endpoint types, `ScriptDeclaration`, `ScriptRef`, `JobRef`, `JobRun`.
@@ -22,7 +22,7 @@ One file per script under `api/src/controllers/`, named `<name>Controller.ts`. T
  */
 import { defineEndpoints, defineRestlet } from '@amerilux/netsuite-api/server';
 import type { Customer } from '../types/models.gen';
-import { findCustomer, searchCustomers } from '../services/customerService';
+import { findCustomer, listCustomers, searchCustomers } from '../services/customerService';
 
 export interface SearchRequest {
     search: string;
@@ -34,6 +34,8 @@ export const customerEndpoints = defineEndpoints({
     /** Customers whose name contains the search text. */
     search: (request: SearchRequest): CustomerSummary[] => searchCustomers(request.search),
     byId: (request: { id: number }): Customer => findCustomer(request.id),
+    /** Every customer the caller may see. Takes no request. */
+    all: (): CustomerSummary[] => listCustomers(),
 });
 
 export type CustomerEndpoints = typeof customerEndpoints;
@@ -55,17 +57,18 @@ The generator reads the file as source, so a few things are rules rather than co
 - Every type in the file is a wire shape and is exported.
 - A type is imported only from the inlined files (by default the generated entity types and the services: what a service returns is the domain type a wire shape is built from), the carried modules (the package's server entry, for `RawResponse`) or another controller. A service's function is never referenced by the handler in place of an annotation.
 - The script declaration is an object literal with literal ids, its `name` is the file name without `Controller`, and the entry point export and the `@NScriptType` header agree with the define function.
-- Script ids are unique across controllers, and no wire shape is named `Endpoints`. A shape's name carries no controller prefix: each controller's generated module is its own namespace.
+- Script ids are unique across controllers, and no wire shape is named `ApiCallOptions` or `ScriptRef`, the two types the generated client imports. A shape's name carries no controller prefix: each controller's generated module is its own namespace.
 
 ## What the generator writes
 
 `netsuite-api generate`, run from the project root, writes four kinds of file:
 
-**`client/src/api/<name>.gen.ts`**, one module per controller: the entity types it names (copied in, with whatever they refer to, so the module stands on its own), its wire shapes, its endpoint type and, for a browser-facing controller, a client built from the declared script:
+**`client/src/api/<name>.gen.ts`**, one module per controller: the entity types it names (copied in, with whatever they refer to, so the module stands on its own), its wire shapes and, for a browser-facing controller, its client: one function per endpoint, each a call to `callEndpoint` with the declared script, the endpoint's name and the request:
 
 ```ts
 // client/src/api/customer.gen.ts
-import { createApiClient } from '@amerilux/netsuite-api/client';
+import { callEndpoint } from '@amerilux/netsuite-api/client';
+import type { ApiCallOptions, ScriptRef } from '@amerilux/netsuite-api/client';
 
 // Types from api/src/types/models.gen.ts, copied so this module stands on its own.
 
@@ -80,16 +83,20 @@ export interface SearchRequest {
 
 export type CustomerSummary = Pick<Customer, 'id' | 'companyName'>;
 
-/** The endpoint signatures of the customer controller, as its handlers declare them. */
-export type Endpoints = {
-    /** Customers whose name contains the search text. */
-    search: (request: SearchRequest) => CustomerSummary[];
-    byId: (request: { id: number }) => Customer;
-};
+/** The script the customer controller declares: every call below posts to it. */
+const customerScriptRef: ScriptRef = { kind: 'restlet', scriptId: 'customscript_app_customer', deployId: 'customdeploy_app_customer' };
 
-/** One typed function per endpoint of the customer controller: \`customer.api.search(...)\`. */
-export const api = createApiClient<Endpoints>({ kind: 'restlet', scriptId: 'customscript_app_customer', deployId: 'customdeploy_app_customer' });
+/** One function per endpoint of the customer controller: `customer.api.search(...)`. */
+export const api = {
+    /** Customers whose name contains the search text. */
+    search: (request: SearchRequest, options?: ApiCallOptions): Promise<CustomerSummary[]> => callEndpoint<CustomerSummary[]>(customerScriptRef, 'search', request, options),
+    byId: (request: { id: number }, options?: ApiCallOptions): Promise<Customer> => callEndpoint<Customer>(customerScriptRef, 'byId', request, options),
+    /** Every customer the caller may see. Takes no request. */
+    all: (options?: ApiCallOptions): Promise<CustomerSummary[]> => callEndpoint<CustomerSummary[]>(customerScriptRef, 'all', {}, options),
+};
 ```
+
+Each function is a real property of `api`, so go-to-definition lands on it, a test can `vi.spyOn(customer.api, 'search')`, and the call it makes is written out: the script, the endpoint and the request. `callEndpoint` is the one place the POST, the envelope and the error handling live.
 
 A type imported from a service is copied the same way, with the entity types it is built on following it in from the models file. A type imported from another controller becomes an import of that controller's module. A type built on something no inlined file declares (`CustomerCreate`, `CustomerPatch`: the repository package's input types; a type a service imports from a package) is an error, because the client could not carry it; write the wire shape out in the controller instead. So is a type reached through a renamed import (`import type { Employee as EmployeeRecord }`) in a service: import it under its own name. A generated module no controller owns any more is deleted on the next run.
 
@@ -102,7 +109,7 @@ export * as customer from './customer.gen';
 export * as user from './user.gen';
 ```
 
-A hook imports `{ customer }` from it, calls `customer.api.search({ search: 'acme' })` and gets a `Promise<customer.CustomerSummary[]>`. The second argument carries an `AbortSignal`.
+A hook imports `{ customer }` from it, calls `customer.api.search({ search: 'acme' })` and gets a `Promise<customer.CustomerSummary[]>`. The call options (an `AbortSignal`, `handleError`) come after the request, or alone for an endpoint that takes none: `customer.api.all({ signal })`.
 
 **`api/src/scripts.gen.ts`**, the server-side map of every declared script by controller name. A repository passes an entry to `createSuiteletClient`; nothing else needs it.
 
@@ -171,7 +178,7 @@ The hook sees the controller, the endpoint name and the request. Throwing an `Ap
 
 ## Answering with a document
 
-Every endpoint answers with the JSON envelope, except a Suitelet endpoint that returns `rawResponse(...)`: a CSV export, a rendered PDF, a File Cabinet file. The handler writes `RawResponse` as its return type, exactly, and the generator lists the endpoint on the client, which resolves it to a `Blob`:
+Every endpoint answers with the JSON envelope, except a Suitelet endpoint that returns `rawResponse(...)`: a CSV export, a rendered PDF, a File Cabinet file. The handler writes `RawResponse` as its return type, exactly, and the generator has the client call it through `callRawEndpoint`, which resolves it to a `Blob`:
 
 ```ts
 import type { RawResponse } from '@amerilux/netsuite-api/server';

@@ -1,4 +1,4 @@
-import { GENERATED_CLIENT_NAME, GENERATED_ENDPOINTS_TYPE_NAME } from './controllerReader.js';
+import { GENERATED_CLIENT_NAME, GENERATED_CLIENT_TYPE_IMPORT_NAMES } from './controllerReader.js';
 import type { ControllerContract, DeclaredScript, EndpointSignature, TypeDeclaration, TypeImportName } from './controllerReader.js';
 import type { JobRunFieldName } from './config.js';
 import { GENERATED_JOB_RESULT_TYPE_NAME } from './jobReader.js';
@@ -7,8 +7,9 @@ import { readReferencedNames, writeDatesAsStrings } from './wireTypes.js';
 
 /**
  * Writes the generated modules. Each controller gets its own client module, `<name>.gen.ts`: the
- * entity and service types it names (copied in, so the module stands on its own), its wire shapes,
- * its endpoint type and, when the browser calls it, its client. The index module re-exports each one as a
+ * entity and service types it names (copied in, so the module stands on its own), its wire shapes
+ * and, when the browser calls it, its client: one function per endpoint, each a call to callEndpoint
+ * (callRawEndpoint for a document) with the controller's script. The index module re-exports each one as a
  * namespace, so a hook writes `user.api.roles()` and names a shape as `user.RolesResponse`. The
  * scripts module is the server-side map a repository passes to createSuiteletClient.
  *
@@ -95,11 +96,52 @@ function indentJsDoc(jsDoc: string): string {
         .join('\n');
 }
 
-// A Date on the wire is an ISO string: the client module says so wherever a shape says Date.
-function emitEndpointMember(endpoint: EndpointSignature): string {
-    const parameter = endpoint.requestType === undefined ? '' : `request${endpoint.requestOptional ? '?' : ''}: ${writeDatesAsStrings(endpoint.requestType, 'type')}`;
-    const member = `${INDENT}${endpoint.name}: (${parameter}) => ${writeDatesAsStrings(endpoint.responseType, 'type')};`;
+/**
+ * One endpoint as a function of the client: the request (when the handler takes one) and the call
+ * options, posted to the controller's script. A document endpoint resolves to a Blob; any other to
+ * what its handler returns, with a Date written as the ISO string it arrives as.
+ */
+function emitClientMethod(endpoint: EndpointSignature, scriptRefName: string): string {
+    const responseType = endpoint.raw ? 'Blob' : writeDatesAsStrings(endpoint.responseType, 'type');
+    const requestParameters = endpoint.requestType === undefined ? [] : [`request${endpoint.requestOptional ? '?' : ''}: ${writeDatesAsStrings(endpoint.requestType, 'type')}`];
+    const parameters = [...requestParameters, 'options?: ApiCallOptions'].join(', ');
+    // A handler without a request still gets a body: the endpoint name alone.
+    const request = endpoint.requestType === undefined ? '{}' : 'request';
+    const call = endpoint.raw
+        ? `callRawEndpoint(${scriptRefName}, '${endpoint.name}', ${request}, options)`
+        : `callEndpoint<${responseType}>(${scriptRefName}, '${endpoint.name}', ${request}, options)`;
+    const member = `${INDENT}${endpoint.name}: (${parameters}): Promise<${responseType}> => ${call},`;
     return endpoint.jsDoc ? `${indentJsDoc(endpoint.jsDoc)}\n${member}` : member;
+}
+
+/** The client of a browser-facing controller: its script, then one function per endpoint posting to it. */
+function emitControllerClient(contract: ControllerContract): string[] {
+    if (contract.endpoints.length === 0) {
+        return [`/** The ${contract.name} controller declares no endpoints yet, so its client has nothing to call. */\nexport const ${GENERATED_CLIENT_NAME} = {};`];
+    }
+    const scriptRefName = `${contract.name}ScriptRef`;
+    const methods = contract.endpoints.map((endpoint) => emitClientMethod(endpoint, scriptRefName));
+    return [
+        `/** The script the ${contract.name} controller declares: every call below posts to it. */\nconst ${scriptRefName}: ScriptRef = ${emitScriptRef({ ...contract.script, browser: true })};`,
+        `/** One function per endpoint of the ${contract.name} controller: \`${contract.name}.${GENERATED_CLIENT_NAME}.${contract.endpoints[0].name}(...)\`. */\n` +
+            `export const ${GENERATED_CLIENT_NAME} = {\n${methods.join('\n')}\n};`,
+    ];
+}
+
+/** The package's call functions the client uses: callRawEndpoint only when an endpoint answers with a document. */
+function emitClientImport(contract: ControllerContract, clientModule: string): string[] {
+    const calls = new Set(contract.endpoints.map((endpoint) => (endpoint.raw ? 'callRawEndpoint' : 'callEndpoint')));
+    return calls.size === 0 ? [] : [`import { ${Array.from(calls).sort().join(', ')} } from '${clientModule}';`];
+}
+
+/**
+ * The imports whose names the emitted code refers to: a type only a handler's signature named (RawResponse) is left
+ * behind. The names are read from the syntax tree, so a type a comment mentions does not count as used.
+ */
+function keepReferencedTypeImports<TTypeImport extends { names: TypeImportName[] }>(typeImports: TTypeImport[], referencedNames: ReadonlySet<string>): TTypeImport[] {
+    return typeImports
+        .map((typeImport) => ({ ...typeImport, names: typeImport.names.filter((imported) => referencedNames.has(imported.alias ?? imported.name)) }))
+        .filter((typeImport) => typeImport.names.length > 0);
 }
 
 function formatImportName(imported: TypeImportName): string {
@@ -132,30 +174,25 @@ export function emitControllerModule({ contract, sourceLabel, inlinedTypes }: Em
         ...(browser ? [] : ['// Called by server code only: its types, and no client.']),
         ESLINT_DISABLE,
     ];
-    const imports = [
-        ...(browser ? [`import { createApiClient } from '${options.clientModule}';`] : []),
-        ...emitTypeImports([
+    const declarations: string[] = [];
+    for (const section of inlinedTypes) {
+        declarations.push(`// Types from ${section.sourceLabel}, copied so this module stands on its own.`);
+        for (const declaration of section.declarations) declarations.push(writeDatesAsStrings(declaration.text, 'declaration'));
+    }
+    for (const declaration of contract.typeDeclarations) declarations.push(writeDatesAsStrings(declaration.text, 'declaration'));
+    const client = browser ? emitControllerClient(contract) : [];
+    // Only what the module names is imported: the project compiles with noUnusedLocals, and a handler's
+    // types reach the module only through the client's signatures, which a server-only module does not have.
+    const typeImports = keepReferencedTypeImports(
+        [
+            ...(browser ? [{ moduleSpecifier: options.clientModule, names: GENERATED_CLIENT_TYPE_IMPORT_NAMES.map((name) => ({ name })) }] : []),
             ...contract.carriedTypeImports,
             ...contract.controllerTypeImports.map((typeImport) => ({ moduleSpecifier: `./${controllerModuleFileName(typeImport.controllerName).replace(/\.ts$/, '')}`, names: typeImport.names })),
-        ]),
-    ];
-    const sections: string[] = [header.join('\n'), imports.join('\n')];
-    for (const section of inlinedTypes) {
-        sections.push(`// Types from ${section.sourceLabel}, copied so this module stands on its own.`);
-        for (const declaration of section.declarations) sections.push(writeDatesAsStrings(declaration.text, 'declaration'));
-    }
-    for (const declaration of contract.typeDeclarations) sections.push(writeDatesAsStrings(declaration.text, 'declaration'));
-    const members = contract.endpoints.map(emitEndpointMember);
-    // A type alias, not an interface: only an object type literal satisfies the Endpoints index signature.
-    sections.push(`/** The endpoint signatures of the ${contract.name} controller, as its handlers declare them. */\nexport type ${GENERATED_ENDPOINTS_TYPE_NAME} = {\n${members.join('\n')}\n};`);
-    if (browser) {
-        const rawEndpoints = contract.endpoints.filter((endpoint) => endpoint.raw).map((endpoint) => `'${endpoint.name}'`);
-        const clientOptions = rawEndpoints.length > 0 ? `, { rawEndpoints: [${rawEndpoints.join(', ')}] }` : '';
-        sections.push(
-            `/** One typed function per endpoint of the ${contract.name} controller: \`${contract.name}.${GENERATED_CLIENT_NAME}.${contract.endpoints[0]?.name ?? 'endpoint'}(...)\`. */\n` +
-                `export const ${GENERATED_CLIENT_NAME} = createApiClient<${GENERATED_ENDPOINTS_TYPE_NAME}>(${emitScriptRef({ ...contract.script, browser: true })}${clientOptions});`,
-        );
-    }
+        ],
+        new Set(readReferencedNames([...declarations, ...client].join('\n\n'), 'declaration')),
+    );
+    const imports = [...(browser ? emitClientImport(contract, options.clientModule) : []), ...emitTypeImports(typeImports)];
+    const sections: string[] = [header.join('\n'), imports.join('\n'), ...declarations, ...client];
     return `${sections.filter((section) => section !== '').join('\n\n')}\n`;
 }
 
@@ -202,10 +239,10 @@ export function emitJobModule({ contract, sourceLabel, inlinedTypes }: EmittedJo
     }
     // A job's stages name package types the result does not (JobSummary on summarize), and those are
     // server-side: only an import a shape actually reaches is carried over.
-    const emittedText = [...declarations, resultType].join('\n');
-    const usedTypeImports = contract.carriedTypeImports
-        .map((typeImport) => ({ ...typeImport, names: typeImport.names.filter((imported) => new RegExp(`\\b${imported.alias ?? imported.name}\\b`).test(emittedText)) }))
-        .filter((typeImport) => typeImport.names.length > 0);
+    const usedTypeImports = keepReferencedTypeImports(
+        contract.carriedTypeImports,
+        new Set([...readReferencedNames(declarations.join('\n\n'), 'declaration'), ...readReferencedNames(resultType, 'type')]),
+    );
     const sections: string[] = [
         [
             `// Generated by netsuite-api generate from ${sourceLabel}. Do not edit: change the job and run \`npm run generate\`.`,

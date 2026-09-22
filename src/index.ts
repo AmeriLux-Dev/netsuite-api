@@ -31,11 +31,12 @@ export const ENDPOINT_PARAMETER = 'endpoint';
 /**
  * An endpoint as the controller declares it: a synchronous function from a request to a response.
  * The parameter type is the request shape and the return type the response shape; a handler with no
- * parameter takes no request. The clients derive their call signatures from these types.
+ * parameter takes no request. The Suitelet client derives its call signatures from these types, and the
+ * generator reads the same types off the handlers to write the browser client.
  */
 export type Endpoint = (request: never) => unknown;
 
-/** A controller's endpoints by name: `typeof userEndpoints`, the type the clients are built from. */
+/** A controller's endpoints by name: `typeof userEndpoints`, the type createSuiteletClient is built from. */
 export type Endpoints = Record<string, Endpoint>;
 
 /** The request type of an endpoint, or void when its handler takes no parameter. */

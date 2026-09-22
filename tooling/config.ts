@@ -65,11 +65,11 @@ export interface ClientGeneratorConfig {
     jobs: string;
     /** The run record the jobs' runs live in. Left out until the project has jobs (`npm run add:jobs` adds it). */
     jobRuns?: JobRunsSettings;
-    /** The client's generated directory: one `<name>.gen.ts` per controller (its wire shapes, its endpoint type, its client) and `index.gen.ts` re-exporting each under the controller's name. Nothing else lives there. */
+    /** The client's generated directory: one `<name>.gen.ts` per controller (its wire shapes and its client) and `index.gen.ts` re-exporting each under the controller's name. Nothing else lives there. */
     outDir: string;
     /** The generated server-side `scripts` map: what a repository passes to createSuiteletClient. */
     scriptsOutFile: string;
-    /** The specifier the controller modules import `createApiClient` from. */
+    /** The specifier the controller modules import `callEndpoint` and `callRawEndpoint` from. */
     clientModule: string;
     /** The specifier the scripts map imports `ScriptRef` from. */
     wireModule: string;

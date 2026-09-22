@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ScriptRef } from '../../src/index.js';
-import { ApiClientError, NO_RESPONSE_STATUS, buildApiUrl, callEndpoint, callRawEndpoint, configureApiClient, createApiClient } from '../../src/client/index.js';
-import type { ApiErrorHandler, RawResponse } from '../../src/client/index.js';
+import { ApiClientError, NO_RESPONSE_STATUS, buildApiUrl, callEndpoint, callRawEndpoint, configureApiClient } from '../../src/client/index.js';
+import type { ApiErrorHandler } from '../../src/client/index.js';
 
 const userScript: ScriptRef = { kind: 'restlet', scriptId: 'customscript_test_user', deployId: 'customdeploy_test_user' };
 
@@ -52,6 +52,12 @@ describe('callEndpoint', () => {
         expect(url).not.toContain('endpoint=');
     });
 
+    it('sends only the endpoint name for an endpoint that takes no request, as the generated client calls it', async () => {
+        const fetchMock = mockFetchResponse(200, { status: 200, error: null, data: { up: true } });
+        await expect(callEndpoint(userScript, 'status', {})).resolves.toEqual({ up: true });
+        expect(JSON.parse(lastRequest(fetchMock).init.body as string)).toEqual({ endpoint: 'status' });
+    });
+
     it('forwards the abort signal', async () => {
         const fetchMock = mockFetchResponse(200, { status: 200, error: null, data: null });
         const signal = new AbortController().signal;
@@ -77,38 +83,14 @@ describe('callEndpoint', () => {
     });
 });
 
-describe('createApiClient', () => {
-    // Stands in for the endpoint interface the generator writes for a controller: the handler signatures are the contract.
-    type PingEndpoints = {
-        ping: (request: { value: number }) => { echoed: number };
-        status: () => { up: boolean };
-    };
-
-    it('exposes one function per endpoint, named by the property accessed', async () => {
-        const fetchMock = mockFetchResponse(200, { status: 200, error: null, data: { echoed: 1 } });
-        const pingApi = createApiClient<PingEndpoints>(userScript);
-        await expect(pingApi.ping({ value: 1 })).resolves.toEqual({ echoed: 1 });
-        expect(JSON.parse(lastRequest(fetchMock).init.body as string)).toEqual({ value: 1, endpoint: 'ping' });
-    });
-
-    it('sends only the endpoint name for an endpoint that takes no request', async () => {
-        const fetchMock = mockFetchResponse(200, { status: 200, error: null, data: { up: true } });
-        const pingApi = createApiClient<PingEndpoints>(userScript);
-        await expect(pingApi.status()).resolves.toEqual({ up: true });
-        expect(JSON.parse(lastRequest(fetchMock).init.body as string)).toEqual({ endpoint: 'status' });
-    });
-
-    it('resolves a raw endpoint to a Blob, the way the generator wires it', async () => {
-        type DocumentsEndpoints = { csv: (request: { month: string }) => RawResponse };
+describe('callRawEndpoint', () => {
+    it('resolves the document to a Blob, posting the request and the endpoint name like any other call', async () => {
         const fetchMock = mockFetchResponse(200, 'month,2026-09', 'text/csv');
-        const documentsApi = createApiClient<DocumentsEndpoints>({ ...userScript, kind: 'suitelet' }, { rawEndpoints: ['csv'] });
-        const blob: Blob = await documentsApi.csv({ month: '2026-09' });
+        const blob: Blob = await callRawEndpoint({ ...userScript, kind: 'suitelet' }, 'csv', { month: '2026-09' });
         expect(await blob.text()).toBe('month,2026-09');
         expect(JSON.parse(lastRequest(fetchMock).init.body as string)).toEqual({ month: '2026-09', endpoint: 'csv' });
     });
-});
 
-describe('callRawEndpoint', () => {
     it('throws the envelope error when the raw endpoint rejects the call', async () => {
         mockFetchResponse(200, { status: 403, error: 'Not permitted', data: null });
         await expect(callRawEndpoint(userScript, 'csv')).rejects.toMatchObject({ name: 'ApiClientError', status: 403, message: 'Not permitted' });
@@ -140,16 +122,11 @@ describe('the configured error handler', () => {
         expect(context).toEqual({ scriptRef: userScript, endpoint: 'byId', request: { id: 9 } });
     });
 
-    it('is told about a raw endpoint that fails, and a client built by createApiClient reports the same way', async () => {
+    it('is told about a raw endpoint that fails', async () => {
         const onError = handler();
         mockFetchResponse(200, { status: 403, error: 'Not permitted', data: null });
         await expect(callRawEndpoint(userScript, 'csv', { month: '2026-09' })).rejects.toMatchObject({ status: 403 });
-        expect(onError).toHaveBeenLastCalledWith(expect.objectContaining({ status: 403 }), { scriptRef: userScript, endpoint: 'csv', request: { month: '2026-09' } });
-
-        type PingEndpoints = { ping: (request: { value: number }) => { echoed: number } };
-        mockFetchResponse(500, '<html>login</html>');
-        await expect(createApiClient<PingEndpoints>(userScript).ping({ value: 1 })).rejects.toMatchObject({ status: 500 });
-        expect(onError).toHaveBeenCalledTimes(2);
+        expect(onError).toHaveBeenCalledWith(expect.objectContaining({ status: 403 }), { scriptRef: userScript, endpoint: 'csv', request: { month: '2026-09' } });
     });
 
     it('is left out when the call passes handleError: false, which still rejects', async () => {
