@@ -212,6 +212,10 @@ export function emitClientIndexModule(controllers: EmittedController[], options:
     if (options.hasJobs) {
         lines.push('/** Every job of this application: the shapes a run of each is started with and ends in. */', `export * as jobs from './${JOBS_INDEX_FILE_NAME.replace(/\.ts$/, '')}';`);
     }
+    if (controllers.length === 0 && !options.hasJobs) {
+        // Without an export the file would be a script, not a module, which isolatedModules rejects.
+        lines.push('/** No controller and no job yet: nothing to re-export until the first one is written. */', 'export {};');
+    }
     return `${lines.join('\n')}\n`;
 }
 

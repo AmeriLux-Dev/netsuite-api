@@ -170,10 +170,8 @@ export function planClientGeneration({ config, fileSystem }: GenerateClientOptio
     const outDirectory = resolve(config.outDir);
     const problems: ControllerProblem[] = [];
 
+    // No controller yet is a project that has just started: the index and the scripts map are written empty.
     const controllerFiles = fileSystem.listFiles(controllersDirectory).filter((filePath) => isControllerFileName(nodePath.basename(filePath)));
-    if (controllerFiles.length === 0) {
-        problems.push({ filePath: label(controllersDirectory), message: 'holds no <name>Controller.ts file.' });
-    }
     const controllerNames = new Set(controllerFiles.map((filePath) => nodePath.basename(filePath).replace(/Controller\.ts$/, '')));
     const inlinableFiles = new Map<string, InlinableTypesFile | 'missing'>();
     /** The inlinable file a specifier names, read once; a file that does not exist is reported once and answered as 'missing'. */

@@ -248,14 +248,22 @@ export const employeeEndpoints = defineEndpoints({ create: (request: EmployeeCre
         expect(plan.files).toEqual([]);
     });
 
-    it('reports an empty controllers folder, and a missing models file when a controller names it', () => {
-        expect(planClientGeneration(optionsFor(projectFiles({
+    it('plans an empty index and scripts map for a project with no controller yet', () => {
+        const plan = planClientGeneration(optionsFor(projectFiles({
             [modelsFile]: undefined,
             [nodePath.join(controllersDirectory, 'userController.ts')]: undefined,
             [nodePath.join(controllersDirectory, 'userRolesController.ts')]: undefined,
-        }))).problems).toEqual([
-            { filePath: 'api/src/controllers', message: 'holds no <name>Controller.ts file.' },
-        ]);
+        })));
+        expect(plan.problems).toEqual([]);
+        expect(plan.files.map((file) => file.path)).toEqual([indexModuleFile, scriptsModuleFile]);
+        const indexModule = plan.files.find((file) => file.path === indexModuleFile)?.content ?? '';
+        expect(indexModule.endsWith('export {};\n')).toBe(true);
+        expect(indexModule.includes('export * as')).toBe(false);
+        const scriptsModule = plan.files.find((file) => file.path === scriptsModuleFile)?.content ?? '';
+        expect(scriptsModule.includes('export const scripts = {\n} as const satisfies Record<string, ScriptRef>;')).toBe(true);
+    });
+
+    it('reports a missing models file when a controller names it', () => {
         expect(planClientGeneration(optionsFor(projectFiles({ [modelsFile]: undefined }))).problems).toEqual([
             { filePath: 'api/src/types/models.gen.ts', message: 'the file to copy types from does not exist; run the model generator first.' },
         ]);
